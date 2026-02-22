@@ -40,6 +40,9 @@ llama-server.service
 .idea/
 .claude/
 
+# Personal deployment scripts (local use only)
+sync-3am.sh
+
 # OS
 .DS_Store
 Thumbs.db

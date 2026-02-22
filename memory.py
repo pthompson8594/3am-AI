@@ -21,8 +21,11 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Callable
+from typing import TYPE_CHECKING, Optional, Callable
 import threading
+
+if TYPE_CHECKING:
+    from data_security import DataEncryptor
 
 import httpx
 import numpy as np
@@ -192,8 +195,10 @@ class MemorySystem:
         llm_url: str = "http://localhost:8080",
         data_dir: Optional[Path] = None,
         model: str = "Qwen3-14B-Q4_K_M",
+        encryptor: Optional["DataEncryptor"] = None,
     ):
         self.llm_url = llm_url
+        self.encryptor = encryptor
         self.data_dir = Path(data_dir) if data_dir else DEFAULT_MEMORY_DIR
         self.db_file = self.data_dir / "memory.db"
         self.pending_file = self.data_dir / "pending_conversations.jsonl"
@@ -405,18 +410,21 @@ class MemorySystem:
         """Populate in-memory caches from DB. Embeddings stay on disk."""
         conn = self._get_conn()
 
+        enc = self.encryptor
+        _d = (lambda s: enc.decrypt_str(s)) if (enc and enc.config.enabled) else (lambda s: s)
+
         for row in conn.execute(
             "SELECT id, summary, category, priority, timestamp, cluster_id, message, response FROM memories"
         ):
             self.messages[row["id"]] = MemoryEntry(
                 id=row["id"],
-                summary=row["summary"],
+                summary=_d(row["summary"]),
                 category=row["category"],
                 priority=row["priority"],
                 timestamp=row["timestamp"],
                 cluster_id=row["cluster_id"],
-                message=row["message"],
-                response=row["response"],
+                message=_d(row["message"]),
+                response=_d(row["response"]),
                 embedding=None,
             )
 
@@ -429,7 +437,7 @@ class MemorySystem:
             )
             self.clusters[row["id"]] = MemoryCluster(
                 id=row["id"],
-                theme=row["theme"],
+                theme=_d(row["theme"]),
                 center_vector=center_vector,
                 message_refs=json.loads(row["message_refs"]),
                 priority=row["priority"],
@@ -438,7 +446,7 @@ class MemorySystem:
             )
 
         row = conn.execute("SELECT value FROM meta WHERE key='user_profile'").fetchone()
-        self._user_profile = row["value"] if row else None
+        self._user_profile = _d(row["value"]) if row and row["value"] else None
 
         row = conn.execute("SELECT value FROM meta WHERE key='stats'").fetchone()
         if row:
@@ -464,6 +472,8 @@ class MemorySystem:
     def _save_memory(self, entry: MemoryEntry, embedding: list[float]):
         """Insert a new MemoryEntry + its embedding into DB."""
         emb_bytes = np.array(embedding, dtype=np.float32).tobytes()
+        enc = self.encryptor
+        _e = (lambda s: enc.encrypt_str(s)) if (enc and enc.config.enabled) else (lambda s: s)
         with self._write_lock:
             conn = self._get_conn()
             conn.execute("""
@@ -471,9 +481,9 @@ class MemorySystem:
                 (id, summary, category, priority, timestamp, cluster_id, message, response)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                entry.id, entry.summary, entry.category, entry.priority,
+                entry.id, _e(entry.summary), entry.category, entry.priority,
                 entry.timestamp, entry.cluster_id,
-                entry.message[:500], entry.response[:500],
+                _e(entry.message[:500]), _e(entry.response[:500]),
             ))
             conn.execute("DELETE FROM vec_memories WHERE memory_id=?", (entry.id,))
             conn.execute(
@@ -485,6 +495,8 @@ class MemorySystem:
     def _save_cluster(self, cluster: MemoryCluster):
         """Upsert a MemoryCluster to DB."""
         center_bytes = np.array(cluster.center_vector, dtype=np.float32).tobytes()
+        enc = self.encryptor
+        theme = enc.encrypt_str(cluster.theme) if (enc and enc.config.enabled) else cluster.theme
         with self._write_lock:
             conn = self._get_conn()
             conn.execute("""
@@ -492,7 +504,7 @@ class MemorySystem:
                 (id, theme, priority, last_update, torque_mass, center_vector, message_refs)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
-                cluster.id, cluster.theme, cluster.priority,
+                cluster.id, theme, cluster.priority,
                 cluster.last_update, cluster.torque_mass,
                 center_bytes, json.dumps(cluster.message_refs),
             ))
@@ -508,11 +520,13 @@ class MemorySystem:
 
     def _save_profile(self, profile: str):
         """Persist the compact user profile to meta table."""
+        enc = self.encryptor
+        stored = enc.encrypt_str(profile) if (enc and enc.config.enabled) else profile
         with self._write_lock:
             conn = self._get_conn()
             conn.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES ('user_profile', ?)",
-                (profile,),
+                (stored,),
             )
             conn.commit()
 
@@ -956,8 +970,12 @@ class MemorySystem:
     def _append_pending(self, entry: dict):
         try:
             self.data_dir.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(entry)
+            enc = self.encryptor
+            if enc and enc.config.enabled:
+                line = enc.encrypt_str(line)
             with open(self.pending_file, "a") as f:
-                f.write(json.dumps(entry) + "\n")
+                f.write(line + "\n")
         except Exception as e:
             print(f"[Memory] Pending write error: {e}")
 
@@ -1181,12 +1199,15 @@ class MemorySystem:
         if not self.pending_file.exists():
             return {"status": "skipped", "reason": "no_pending_file"}
 
+        enc = self.encryptor
         pending = []
         with open(self.pending_file) as f:
             for line in f:
                 line = line.strip()
                 if line:
                     try:
+                        if enc and enc.config.enabled:
+                            line = enc.decrypt_str(line)
                         pending.append(json.loads(line))
                     except Exception:
                         pass

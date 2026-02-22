@@ -16,8 +16,11 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, date
 from pathlib import Path
-from typing import Optional, Callable, Any
+from typing import TYPE_CHECKING, Optional, Callable, Any
 import httpx
+
+if TYPE_CHECKING:
+    from data_security import DataEncryptor
 
 
 DATA_DIR = Path.home() / ".local/share/3am"
@@ -209,52 +212,61 @@ class ResearchSystem:
         llm_url: str = "http://localhost:8080",
         llm_model_id: str = "qwen3-14b",
         web_search_fn: Optional[Callable] = None,
-        on_status: Optional[Callable[[str], None]] = None
+        on_status: Optional[Callable[[str], None]] = None,
+        encryptor: Optional["DataEncryptor"] = None,
     ):
         self.llm_url = llm_url
         self.llm_model_id = llm_model_id
         self.web_search_fn = web_search_fn
         self.on_status = on_status or (lambda x: None)
-        
+        self.encryptor = encryptor
+
         self.config = ResearchConfig.load()
         self.topics: list[ResearchTopic] = []
         self.insights: list[Insight] = []
         self.usage = DailyUsage(date=str(date.today()))
-        
+
         self._load()
     
     def _load(self):
         try:
-            if RESEARCH_FILE.exists():
+            if not RESEARCH_FILE.exists():
+                return
+            if self.encryptor and self.encryptor.config.enabled:
+                data = self.encryptor.decrypt_file(RESEARCH_FILE)
+            else:
                 with open(RESEARCH_FILE) as f:
                     data = json.load(f)
-                
-                self.topics = [ResearchTopic.from_dict(t) for t in data.get("topics", [])]
-                self.insights = [Insight.from_dict(i) for i in data.get("insights", [])]
-                
-                usage_data = data.get("usage", {})
-                if usage_data.get("date") == str(date.today()):
-                    self.usage = DailyUsage.from_dict(usage_data)
-                else:
-                    self.usage = DailyUsage(date=str(date.today()))
-                    
+
+            self.topics = [ResearchTopic.from_dict(t) for t in data.get("topics", [])]
+            self.insights = [Insight.from_dict(i) for i in data.get("insights", [])]
+
+            usage_data = data.get("usage", {})
+            if usage_data.get("date") == str(date.today()):
+                self.usage = DailyUsage.from_dict(usage_data)
+            else:
+                self.usage = DailyUsage(date=str(date.today()))
+
         except Exception as e:
             self.on_status(f"[Research] Load error: {e}")
-    
+
     def _save(self):
         try:
             DATA_DIR.mkdir(parents=True, exist_ok=True)
-            
+
             data = {
-                "topics": [t.to_dict() for t in self.topics[-50:]],  # Keep last 50 topics
-                "insights": [i.to_dict() for i in self.insights[-100:]],  # Keep last 100 insights
+                "topics": [t.to_dict() for t in self.topics[-50:]],
+                "insights": [i.to_dict() for i in self.insights[-100:]],
                 "usage": self.usage.to_dict(),
                 "last_update": time.time(),
             }
-            
-            with open(RESEARCH_FILE, "w") as f:
-                json.dump(data, f, indent=2)
-                
+
+            if self.encryptor and self.encryptor.config.enabled:
+                self.encryptor.encrypt_file(RESEARCH_FILE, data)
+            else:
+                with open(RESEARCH_FILE, "w") as f:
+                    json.dump(data, f, indent=2)
+
         except Exception as e:
             self.on_status(f"[Research] Save error: {e}")
     

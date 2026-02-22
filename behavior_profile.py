@@ -10,10 +10,11 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from experience_log import ExperienceLog
+    from data_security import DataEncryptor
 
 
 _DEFAULTS = {
@@ -37,10 +38,11 @@ class BehaviorProfile:
     Thread-safe file-backed JSON store.
     """
 
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, encryptor: Optional["DataEncryptor"] = None):
         self._path = data_dir / "behavior_profile.json"
         self._lock = threading.Lock()
         self._data: dict = {}
+        self._encryptor = encryptor
         self._load()
 
     # ── Persistence ───────────────────────────────────────────────────────────
@@ -49,10 +51,13 @@ class BehaviorProfile:
         with self._lock:
             if self._path.exists():
                 try:
-                    with open(self._path) as f:
-                        loaded = json.load(f)
+                    if self._encryptor and self._encryptor.config.enabled:
+                        loaded = self._encryptor.decrypt_file(self._path)
+                    else:
+                        with open(self._path) as f:
+                            loaded = json.load(f)
                     # Merge with defaults so new keys always exist
-                    self._data = {**_DEFAULTS, **loaded}
+                    self._data = {**_DEFAULTS, **(loaded or {})}
                 except (json.JSONDecodeError, OSError):
                     self._data = dict(_DEFAULTS)
             else:
@@ -61,8 +66,11 @@ class BehaviorProfile:
     def _save(self):
         """Must be called under self._lock."""
         try:
-            with open(self._path, "w") as f:
-                json.dump(self._data, f, indent=2)
+            if self._encryptor and self._encryptor.config.enabled:
+                self._encryptor.encrypt_file(self._path, self._data)
+            else:
+                with open(self._path, "w") as f:
+                    json.dump(self._data, f, indent=2)
         except OSError:
             pass
 

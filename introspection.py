@@ -19,7 +19,7 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Callable, Any
+from typing import TYPE_CHECKING, Optional, Callable, Any
 import threading
 
 import numpy as np
@@ -29,6 +29,9 @@ from memory import MemorySystem, MemoryCluster, MemoryEntry
 from research import ResearchSystem
 from self_improve import SelfImproveSystem
 
+if TYPE_CHECKING:
+    from data_security import DataEncryptor
+
 
 DATA_DIR = Path.home() / ".local/share/3am"
 ERROR_LOG_FILE = DATA_DIR / "error_journal.json"
@@ -37,6 +40,9 @@ CONSOLIDATION_CONFIG_FILE = DATA_DIR / "consolidation_config.json"
 
 # How often the lightweight idle cycle runs (research + self-improve)
 IDLE_INTERVAL_SECONDS = 3600  # 1 hour
+
+# How often the lite re-cluster pass runs (assign unclustered facts to existing clusters)
+LITE_RECLUSTER_INTERVAL = 8 * 3600  # 3× per day
 
 
 @dataclass
@@ -219,14 +225,15 @@ class IntrospectionLoop:
         llm_model_id: str = "qwen3-14b",
         on_status: Optional[Callable[[str], None]] = None,
         web_search_fn: Optional[Callable] = None,
-        config_file: Optional[Path] = None
+        config_file: Optional[Path] = None,
+        encryptor: Optional["DataEncryptor"] = None,
     ):
         self.memory = memory
         self.llm_url = llm_url
         self.llm_model_id = llm_model_id
         self.on_status = on_status or (lambda x: None)
         self.error_journal = ErrorJournal()
-        # MK13: optional hooks set by UserLLMCore after construction
+        # Optional hooks set by UserLLMCore after construction
         self.experience_log = None   # ExperienceLog | None
         self.behavior_profile = None # BehaviorProfile | None
         self.stats = IntrospectionStats()
@@ -236,17 +243,19 @@ class IntrospectionLoop:
         self._idle_in_progress = False  # True while run_idle_cycle() is executing
         self._task: Optional[asyncio.Task] = None
         self._client: Optional[httpx.AsyncClient] = None
-        
+        self._last_lite_recluster: float = 0  # epoch time of last incremental recluster
+
         # Consolidation config (opt-in)
         self._config_file = config_file
         self.config = ConsolidationConfig.load(config_file)
-        
+
         # Research system for proactive learning
         self.research = ResearchSystem(
             llm_url=llm_url,
             llm_model_id=llm_model_id,
             web_search_fn=web_search_fn,
-            on_status=on_status
+            on_status=on_status,
+            encryptor=encryptor,
         )
         
         # Self-improvement system for LLM-suggested upgrades
@@ -649,18 +658,42 @@ class IntrospectionLoop:
                 except Exception as e:
                     self.on_status(f"[Introspection] Error in memory cycle: {e}")
 
+    async def _run_lite_cluster_cycle(self):
+        """
+        Assign any unclustered facts to existing clusters (incremental mode).
+        Fast: no LLM calls, no full rebuild. Runs up to 3× per day.
+        Skipped if the heavy 3 AM cycle is currently running.
+        """
+        if self._in_progress:
+            return
+        if not self.memory.needs_reclustering():
+            return
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                result = await self.memory.run_torque_clustering_async(client, mode="incremental")
+            self._last_lite_recluster = time.time()
+            self.on_status(f"[Introspection] Lite recluster complete: {result.get('status', 'done')}")
+        except Exception as e:
+            self.on_status(f"[Introspection] Lite recluster error: {e}")
+
     async def _light_idle_loop(self):
-        """Hourly loop for lightweight research and self-improvement."""
+        """Hourly loop for lightweight research, self-improvement, and lite re-clustering."""
         while self._running_idle:
             await asyncio.sleep(IDLE_INTERVAL_SECONDS)
-            if self._running_idle:
-                self._idle_in_progress = True
-                try:
-                    await self.run_idle_cycle()
-                except Exception as e:
-                    self.on_status(f"[Introspection] Idle cycle error: {e}")
-                finally:
-                    self._idle_in_progress = False
+            if not self._running_idle:
+                break
+
+            # Lite re-cluster: assign unclustered facts every 8 hours
+            if time.time() - self._last_lite_recluster > LITE_RECLUSTER_INTERVAL:
+                await self._run_lite_cluster_cycle()
+
+            self._idle_in_progress = True
+            try:
+                await self.run_idle_cycle()
+            except Exception as e:
+                self.on_status(f"[Introspection] Idle cycle error: {e}")
+            finally:
+                self._idle_in_progress = False
 
     def _start_idle_loop(self):
         """Start the lightweight hourly idle loop in a background thread."""

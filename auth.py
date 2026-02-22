@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Optional
 import re
 
-from data_security import SecureUserData, generate_salt
+from data_security import SecureUserData, generate_salt, derive_key_from_password
 
 
 DATA_DIR = Path.home() / ".local/share/3am"
@@ -39,7 +39,8 @@ class User:
     created_at: float
     last_login: float = 0
     settings: dict = field(default_factory=dict)
-    
+    encryption_salt: str = ""  # hex-encoded 16-byte salt for key derivation
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,
@@ -49,6 +50,7 @@ class User:
             "created_at": self.created_at,
             "last_login": self.last_login,
             "settings": self.settings,
+            "encryption_salt": self.encryption_salt,
         }
     
     @classmethod
@@ -110,7 +112,8 @@ class AuthSystem:
         self.session_timeout_hours = session_timeout_hours
         self.users: dict[str, User] = {}  # username -> User
         self.sessions: dict[str, Session] = {}  # token -> Session
-        
+        self._user_keys: dict[str, bytes] = {}  # user_id -> Fernet key (never persisted)
+
         self._load()
     
     def _load(self):
@@ -225,13 +228,15 @@ class AuthSystem:
         # Create user
         salt = secrets.token_hex(16)
         password_hash = self._hash_password(password, salt)
-        
+        enc_salt = generate_salt().hex()  # separate salt for key derivation
+
         user = User(
             id=self._generate_user_id(),
             username=username,
             password_hash=password_hash,
             salt=salt,
             created_at=time.time(),
+            encryption_salt=enc_salt,
         )
         
         self.users[username] = user
@@ -268,8 +273,17 @@ class AuthSystem:
         
         # Update last login
         user.last_login = time.time()
+
+        # Ensure encryption_salt exists (migration for existing users)
+        if not user.encryption_salt:
+            user.encryption_salt = generate_salt().hex()
+
+        # Derive and cache the encryption key for this session
+        enc_key = derive_key_from_password(password, bytes.fromhex(user.encryption_salt))
+        self._user_keys[user.id] = enc_key
+
         self._save_users()
-        
+
         # Create session
         token = self._generate_session_token()
         session = Session(
@@ -296,7 +310,12 @@ class AuthSystem:
             True if session was found and removed
         """
         if token in self.sessions:
+            user_id = self.sessions[token].user_id
             del self.sessions[token]
+            # Clear encryption key if no other active sessions remain for this user
+            remaining = any(s.user_id == user_id for s in self.sessions.values())
+            if not remaining:
+                self._user_keys.pop(user_id, None)
             self._save_sessions()
             return True
         return False
@@ -337,6 +356,10 @@ class AuthSystem:
                 return user
         return None
     
+    def get_user_key(self, user_id: str) -> Optional[bytes]:
+        """Return the in-memory Fernet key for a user, or None if not logged in."""
+        return self._user_keys.get(user_id)
+
     def get_user_data(self, user: User) -> SecureUserData:
         """Get the secure data handler for a user."""
         return SecureUserData(user.id)

@@ -2,29 +2,35 @@
 """
 Data Security - Encryption and decryption for user data.
 
-Provides placeholder functions for encrypting/decrypting user data at rest.
-Currently stores data in plaintext with encryption planned for future implementation.
+Provides Fernet symmetric encryption with PBKDF2HMAC-SHA256 key derivation.
+Keys are derived from the user's login password and never written to disk —
+they live only in AuthSystem._user_keys for the duration of the session.
 
-Future implementation will use:
-- User-derived keys (from password via PBKDF2/Argon2)
-- AES-256-GCM for symmetric encryption
-- Per-user encryption keys
+Graceful fallback: if decryption fails (legacy plaintext data), the original
+bytes are returned unchanged. This allows transparent migration of existing
+unencrypted data — old entries are served as-is and will be re-encrypted on
+next write.
 """
 
+import base64
 import json
 import os
 from pathlib import Path
 from typing import Any, Optional
 from dataclasses import dataclass
 
+from cryptography.fernet import Fernet, InvalidToken
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+
 
 @dataclass
 class EncryptionConfig:
     """Configuration for data encryption."""
-    enabled: bool = False  # TODO: Enable when implemented
-    algorithm: str = "AES-256-GCM"  # Planned algorithm
-    key_derivation: str = "argon2id"  # Planned KDF
-    
+    enabled: bool = False
+    algorithm: str = "Fernet/AES-128-CBC"
+    key_derivation: str = "PBKDF2HMAC-SHA256"
+
     def to_dict(self) -> dict:
         return {
             "enabled": self.enabled,
@@ -35,201 +41,148 @@ class EncryptionConfig:
 
 class DataEncryptor:
     """
-    Handles encryption/decryption of user data.
-    
-    Currently a placeholder that stores data in plaintext.
-    Will be upgraded to use proper encryption.
+    Handles encryption/decryption of user data using Fernet symmetric encryption.
+
+    Key is derived from the user's login password via PBKDF2HMAC-SHA256 and
+    lives in memory only — never written to disk.
+
+    Graceful fallback: decrypting plaintext (legacy) data returns it unchanged.
     """
-    
+
     def __init__(self, user_key: Optional[bytes] = None):
         """
-        Initialize encryptor with optional user-derived key.
-        
         Args:
-            user_key: Encryption key derived from user's password.
-                     None means encryption is disabled.
+            user_key: URL-safe base64-encoded 32-byte Fernet key.
+                      None means encryption is disabled (plaintext mode).
         """
         self.user_key = user_key
-        self.config = EncryptionConfig()
-    
+        self.config = EncryptionConfig(enabled=(user_key is not None))
+        self._fernet = Fernet(user_key) if user_key else None
+
     def encrypt(self, data: bytes) -> bytes:
-        """
-        Encrypt data bytes.
-        
-        Args:
-            data: Raw bytes to encrypt
-            
-        Returns:
-            Encrypted bytes (currently returns plaintext as placeholder)
-        """
-        if not self.config.enabled or not self.user_key:
+        """Encrypt bytes. Returns data unchanged if encryption disabled."""
+        if not self._fernet:
             return data
-        
-        # TODO: Implement AES-256-GCM encryption
-        # from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-        # nonce = os.urandom(12)
-        # aesgcm = AESGCM(self.user_key)
-        # ciphertext = aesgcm.encrypt(nonce, data, None)
-        # return nonce + ciphertext
-        
-        return data
-    
+        return self._fernet.encrypt(data)
+
     def decrypt(self, data: bytes) -> bytes:
         """
-        Decrypt data bytes.
-        
-        Args:
-            data: Encrypted bytes to decrypt
-            
-        Returns:
-            Decrypted bytes (currently returns input as placeholder)
+        Decrypt bytes. Falls back to returning data unchanged if it is
+        legacy plaintext (InvalidToken) or encryption is disabled.
         """
-        if not self.config.enabled or not self.user_key:
+        if not self._fernet:
             return data
-        
-        # TODO: Implement AES-256-GCM decryption
-        # from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-        # nonce = data[:12]
-        # ciphertext = data[12:]
-        # aesgcm = AESGCM(self.user_key)
-        # return aesgcm.decrypt(nonce, ciphertext, None)
-        
-        return data
-    
+        try:
+            return self._fernet.decrypt(data)
+        except (InvalidToken, Exception):
+            # Legacy plaintext — return as-is for graceful migration
+            return data
+
+    def encrypt_str(self, s: str) -> str:
+        """Encrypt a UTF-8 string, returning an encrypted string."""
+        if not self._fernet:
+            return s
+        return self.encrypt(s.encode()).decode()
+
+    def decrypt_str(self, s: str) -> str:
+        """Decrypt an encrypted string. Falls back to returning s if not encrypted."""
+        if not self._fernet:
+            return s
+        return self.decrypt(s.encode()).decode()
+
     def encrypt_json(self, data: Any) -> bytes:
-        """
-        Encrypt a JSON-serializable object.
-        
-        Args:
-            data: Python object to serialize and encrypt
-            
-        Returns:
-            Encrypted bytes
-        """
+        """Serialize to JSON and encrypt."""
         json_bytes = json.dumps(data, ensure_ascii=False).encode('utf-8')
         return self.encrypt(json_bytes)
-    
+
     def decrypt_json(self, data: bytes) -> Any:
-        """
-        Decrypt and deserialize JSON data.
-        
-        Args:
-            data: Encrypted bytes containing JSON
-            
-        Returns:
-            Deserialized Python object
-        """
+        """Decrypt and deserialize JSON data."""
         decrypted = self.decrypt(data)
         return json.loads(decrypted.decode('utf-8'))
-    
+
     def encrypt_file(self, path: Path, data: Any):
-        """
-        Encrypt and write data to a file.
-        
-        Args:
-            path: File path to write to
-            data: JSON-serializable data to encrypt and write
-        """
+        """Encrypt and write JSON-serializable data to a file."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        
-        if self.config.enabled:
+        if self._fernet:
             encrypted = self.encrypt_json(data)
             path.write_bytes(encrypted)
         else:
-            # Plaintext JSON for now
             with open(path, 'w') as f:
                 json.dump(data, f, indent=2)
-    
+
     def decrypt_file(self, path: Path) -> Any:
-        """
-        Read and decrypt data from a file.
-        
-        Args:
-            path: File path to read from
-            
-        Returns:
-            Decrypted and deserialized data
-        """
+        """Read and decrypt data from a file."""
         if not path.exists():
             return None
-        
-        if self.config.enabled:
+        if self._fernet:
             encrypted = path.read_bytes()
             return self.decrypt_json(encrypted)
         else:
-            # Plaintext JSON for now
             with open(path) as f:
                 return json.load(f)
 
 
 def derive_key_from_password(password: str, salt: bytes) -> bytes:
     """
-    Derive an encryption key from a user's password.
-    
+    Derive a Fernet-compatible key from a user's password using PBKDF2HMAC-SHA256.
+
     Args:
         password: User's plaintext password
-        salt: Random salt for key derivation
-        
+        salt: Random salt (16 bytes) stored per-user in users.json
+
     Returns:
-        32-byte key suitable for AES-256
+        URL-safe base64-encoded 32-byte key suitable for Fernet
     """
-    # TODO: Implement proper key derivation
-    # from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
-    # kdf = Argon2id(
-    #     length=32,
-    #     salt=salt,
-    #     time_cost=3,
-    #     memory_cost=65536,
-    #     parallelism=4,
-    # )
-    # return kdf.derive(password.encode('utf-8'))
-    
-    # Placeholder: return None to indicate encryption not ready
-    return None
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=100_000,
+    )
+    raw_key = kdf.derive(password.encode('utf-8'))
+    return base64.urlsafe_b64encode(raw_key)
 
 
 def generate_salt() -> bytes:
-    """Generate a random salt for key derivation."""
+    """Generate a random 16-byte salt for key derivation."""
     return os.urandom(16)
 
 
 class SecureUserData:
     """
     Wrapper for per-user data with encryption support.
-    
-    Handles reading/writing user data files with optional encryption.
+
+    Handles reading/writing user data files with optional Fernet encryption.
     """
-    
+
     def __init__(self, user_id: str, user_key: Optional[bytes] = None):
         """
-        Initialize secure data handler for a user.
-        
         Args:
             user_id: Unique user identifier
-            user_key: Encryption key derived from user's password
+            user_key: Fernet key derived from user's password (None = plaintext)
         """
         self.user_id = user_id
         self.encryptor = DataEncryptor(user_key)
         self.base_path = Path.home() / ".local/share/3am/users" / user_id
-    
+
     def save(self, filename: str, data: Any):
-        """Save data to a user file (with encryption if enabled)."""
+        """Save data to a user file (encrypted if key provided)."""
         path = self.base_path / filename
         self.encryptor.encrypt_file(path, data)
-    
+
     def load(self, filename: str, default: Any = None) -> Any:
-        """Load data from a user file (with decryption if enabled)."""
+        """Load data from a user file (decrypted if key provided)."""
         path = self.base_path / filename
         try:
             result = self.encryptor.decrypt_file(path)
             return result if result is not None else default
         except Exception:
             return default
-    
+
     def exists(self, filename: str) -> bool:
         """Check if a user data file exists."""
         return (self.base_path / filename).exists()
-    
+
     def delete(self, filename: str) -> bool:
         """Delete a user data file."""
         path = self.base_path / filename
@@ -237,7 +190,7 @@ class SecureUserData:
             path.unlink()
             return True
         return False
-    
+
     def list_files(self, pattern: str = "*") -> list[Path]:
         """List files in user's data directory."""
         if not self.base_path.exists():

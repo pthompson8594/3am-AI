@@ -29,7 +29,7 @@ import httpx
 
 from auth import AuthSystem, AuthError, User
 from scheduler import IntrospectionScheduler, SchedulerConfig, CheckResult
-from data_security import SecureUserData
+from data_security import SecureUserData, DataEncryptor
 from tools import ToolExecutor, parse_inline_tool_calls, PendingApproval
 from commands import CommandHandler, CommandResult
 from memory import MemorySystem
@@ -185,6 +185,10 @@ class UserLLMCore:
         
         # Ensure user directory exists
         self.user_data.base_path.mkdir(parents=True, exist_ok=True)
+
+        # Build encryptor from the in-memory key (None if user not yet logged in via auth)
+        _enc_key = auth.get_user_key(user.id)
+        self._encryptor = DataEncryptor(_enc_key)
         
         # Set per-user data directories for modules that use global paths
         import introspection as intro_mod
@@ -209,7 +213,8 @@ class UserLLMCore:
         self.memory = MemorySystem(
             llm_url=LLM_URL,
             data_dir=self.user_data.base_path,
-            model=_DETECTED_MODEL
+            model=_DETECTED_MODEL,
+            encryptor=self._encryptor,
         )
         
         # Per-user introspection
@@ -218,7 +223,8 @@ class UserLLMCore:
             llm_url=LLM_URL,
             llm_model_id=_DETECTED_MODEL,
             on_status=self._make_status_callback(),
-            web_search_fn=self._web_search_for_research
+            web_search_fn=self._web_search_for_research,
+            encryptor=self._encryptor,
         )
         
         # Load user settings
@@ -236,7 +242,7 @@ class UserLLMCore:
         self.decision_gate = DecisionGate(llm_url=LLM_URL, model=_DETECTED_MODEL)
 
         # MK13: Behavior profile (learned behavioral prefs injected into system prompt)
-        self.behavior_profile = BehaviorProfile(self.user_data.base_path)
+        self.behavior_profile = BehaviorProfile(self.user_data.base_path, encryptor=self._encryptor)
 
         # MK13: Wire experience_log and behavior_profile into introspection loop
         self.introspection.experience_log = self.experience_log
@@ -247,6 +253,7 @@ class UserLLMCore:
             working_dir=str(Path.home()),
             search_provider=self.search_provider,
             data_dir=self.user_data.base_path,
+            encryptor=self._encryptor,
         )
 
         # Command handler

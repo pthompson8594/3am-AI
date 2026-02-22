@@ -21,8 +21,11 @@ Cloud AI assistants are stateless. Every conversation starts from zero. They don
 ### Persistent Memory with Torque Clustering
 Conversations are extracted into discrete facts, embedded, and organized using a physics-inspired clustering algorithm based on gravitational torque. The system automatically discovers natural topic boundaries — no manual thresholds. High-importance clusters get priority in context retrieval, so the model remembers what matters most.
 
+### Encryption at Rest
+All sensitive user data is encrypted using Fernet (AES-128-CBC + HMAC-SHA256). The key is derived from your login password via PBKDF2HMAC-SHA256 and lives only in memory — never written to disk, cleared on logout or server restart. Every field the model extracts about you (summaries, conversation excerpts, cluster themes, behavior profile, research notes, installed tools) is stored encrypted. Embedding vectors remain plaintext because they are required for vector similarity search and are not human-readable. Existing unencrypted data migrates transparently on re-write.
+
 ### Sleep Processing
-During the day, conversations are saved cheaply. At 3 AM, the system runs a full processing cycle: grouping related conversations, extracting multiple facts per topic, resolving conflicting information (newer facts supersede older ones), and rebuilding the cluster map. This keeps the chat path fast while doing heavy work in the background.
+During the day, conversations are saved cheaply. Three times per day (every 8 hours), unclustered facts are assigned to existing clusters so they become available for context retrieval the same day. At 3 AM, the system runs a full processing cycle: grouping related conversations, extracting multiple facts per topic, resolving conflicting information (newer facts supersede older ones), and rebuilding the cluster map. This keeps the chat path fast while doing heavy work in the background.
 
 ### Self-Created Tools
 When the system identifies something it can't do, it can propose, generate, and install new Python tools — with you approving at every step. A three-stage pipeline (concept → code review → install) ensures nothing runs without your sign-off. Safety scanning blocks dangerous imports. Tools persist across restarts and model swaps.

@@ -14,8 +14,8 @@ pydantic>=2.5.0
 # Password hashing (for production)
 # bcrypt>=4.1.0
 
-# Encryption (for future)
-# cryptography>=41.0.0
+# Encryption (Fernet field-level encryption for user data at rest)
+cryptography>=41.0.0
 
 # Embeddings (from MK7)
 # Note: Install CPU-only torch first on low-RAM systems:

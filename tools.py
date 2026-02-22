@@ -19,7 +19,10 @@ import re
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional, Callable
+from typing import TYPE_CHECKING, Optional, Callable
+
+if TYPE_CHECKING:
+    from data_security import DataEncryptor
 from urllib.parse import quote_plus
 
 import httpx
@@ -184,8 +187,9 @@ class CustomToolRegistry:
         "importlib.", "builtins.", "__builtins__", "globals(", "locals(",
     ]
 
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, encryptor: Optional["DataEncryptor"] = None):
         self.data_dir = data_dir
+        self._encryptor = encryptor
         # { name: {schema, fn, code, prompt_addition, installed_at} }
         self._tools: dict[str, dict] = {}
         self._load()
@@ -199,8 +203,11 @@ class CustomToolRegistry:
         if not path.exists():
             return
         try:
-            with open(path) as f:
-                data = json.load(f)
+            if self._encryptor and self._encryptor.config.enabled:
+                data = self._encryptor.decrypt_file(path)
+            else:
+                with open(path) as f:
+                    data = json.load(f)
             for entry in data.get("tools", []):
                 try:
                     self._exec_and_register(
@@ -229,8 +236,12 @@ class CustomToolRegistry:
             }
             for name, entry in self._tools.items()
         ]
-        with open(self._tools_file(), "w") as f:
-            json.dump({"tools": tools_list, "last_update": time.time()}, f, indent=2)
+        data = {"tools": tools_list, "last_update": time.time()}
+        if self._encryptor and self._encryptor.config.enabled:
+            self._encryptor.encrypt_file(self._tools_file(), data)
+        else:
+            with open(self._tools_file(), "w") as f:
+                json.dump(data, f, indent=2)
 
     def check_code_safety(self, code: str) -> list[str]:
         """Scan code for dangerous patterns. Returns list of violations."""
@@ -386,6 +397,7 @@ class ToolExecutor:
         on_tool_output: Optional[Callable] = None,
         search_provider: str = "google",
         data_dir: Optional[Path] = None,
+        encryptor: Optional["DataEncryptor"] = None,
     ):
         self.working_dir = working_dir or os.getcwd()
         self.on_approval_needed = on_approval_needed
@@ -395,7 +407,10 @@ class ToolExecutor:
         self.last_command = ""
         self.last_output = ""
         self.pending_approval: Optional[PendingApproval] = None
-        self.custom_registry = CustomToolRegistry(data_dir or Path.home() / ".config" / "3am")
+        self.custom_registry = CustomToolRegistry(
+            data_dir or Path.home() / ".config" / "3am",
+            encryptor=encryptor,
+        )
 
     def get_active_tools(self) -> list[dict]:
         """Return TOOLS + installed custom tool schemas for LLM API calls."""

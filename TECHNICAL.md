@@ -1,8 +1,43 @@
-# LLM Unified MK13
+# 3AM — Technical Reference
 
-Web-based LLM assistant with **Torque Clustering memory system, SQLite + sqlite-vec storage, multi-user support, ChatGPT-like interface, self-created custom tools, decision gate, logprobs-based confidence scoring, and a feedback-driven experience log**.
+Web-based LLM assistant with **Torque Clustering memory system, SQLite + sqlite-vec storage, multi-user support, ChatGPT-like interface, self-created custom tools, decision gate, logprobs-based confidence scoring, feedback-driven behavior adaptation, and Fernet field-level encryption at rest**.
 
-## What's New in MK13 (current)
+## What's New in v1.1.0 (current)
+
+### Fernet Field-Level Encryption
+
+All sensitive user data is now encrypted at rest using **Fernet** (AES-128-CBC + HMAC-SHA256, from the Python `cryptography` library).
+
+**Key management:**
+- Key derived from login password via PBKDF2HMAC-SHA256 (100,000 iterations, per-user 16-byte salt)
+- Key lives only in `AuthSystem._user_keys` (process memory) — never written to disk
+- Cleared when the last session for that user is invalidated (logout or server restart)
+- Per-user `encryption_salt` stored in `users.json` (plaintext — just random bytes, not the key)
+
+**Encrypted fields:**
+- SQLite `memories` table: `summary`, `message`, `response`
+- SQLite `clusters` table: `theme`
+- SQLite `meta` table: `user_profile` value
+- `pending_conversations.jsonl`: each line encrypted individually
+- `behavior_profile.json`, `research.json`, `installed_tools.json`: encrypted as binary blobs
+
+**Not encrypted:** embedding vectors in `vec_memories` (required for sqlite-vec similarity search, not human-readable)
+
+**Migration:** existing plaintext data is returned as-is via graceful `InvalidToken` fallback; it gets encrypted on the next write. No manual migration step needed.
+
+### Lite Re-clustering 3× Per Day
+
+The hourly idle loop now runs an **incremental recluster** every 8 hours — assigning any unclustered facts to existing clusters without a full rebuild:
+
+- Mode: `run_torque_clustering_async(mode="incremental")` → `assign_unclustered_memories()`
+- No LLM calls, no distance matrix rebuild, no theme regeneration
+- New memories are available for context retrieval the same day they're stored
+- Skipped automatically if the 3 AM memory cycle is in progress
+- Full nightly Torque Clustering rebuild at 3 AM is unchanged
+
+---
+
+## What's New in MK13 (v1.0.0)
 
 ### Decision Gate
 The LLM now evaluates what it knows *before* generating a response — after memory is loaded so it has full context.
@@ -637,7 +672,7 @@ curl -X POST "http://localhost:8000/api/introspection/trigger?force_recluster=tr
 | `server.py` | FastAPI web server |
 | `auth.py` | User authentication |
 | `scheduler.py` | Scheduled introspection |
-| `data_security.py` | Encryption placeholders for user data |
+| `data_security.py` | Fernet encryption: `DataEncryptor`, `derive_key_from_password`, `SecureUserData` |
 | `llm_core.py` | Core LLM logic (terminal interface, from MK7) |
 | `memory.py` | Memory system with SQLite + sqlite-vec and Torque Clustering (MK11) |
 | `introspection.py` | Introspection loop with Torque re-clustering + behavior profile update (MK13) |
@@ -672,11 +707,12 @@ Benefits for LLM context:
 
 ### Tiered Clustering Strategy
 
-The nightly 3am pass uses a smart three-tier dispatch to stay fast at scale:
+Clustering runs on multiple cadences:
 
 | Tier | When | Cost | What it does |
 |------|------|------|--------------|
-| **Incremental** | Most nights (new facts, no oversized clusters) | O(new × clusters) | Assigns new unclassified facts to nearest existing cluster |
+| **Daytime incremental** | Every 8 hours (3× daily, idle loop) | O(new × clusters) | Assigns new unclustered facts to nearest existing cluster — same-day availability |
+| **Nightly incremental** | Most nights (no oversized clusters) | O(new × clusters) | Same as daytime pass, catches anything the day passes missed |
 | **Split** | Any cluster exceeds 20 facts | O(k × cluster_size²) | Re-clusters only the oversized cluster(s), leaves everything else alone |
 | **Full** | Once per week (every 7 days) | O(n²) | Complete rebuild — catches topic drift, merges/splits anything |
 
@@ -735,11 +771,12 @@ distance peaks," IEEE TPAMI, 2025. DOI: 10.1109/TPAMI.2025.3535743
 
 ## Security
 
-- Passwords hashed with bcrypt
+- Passwords hashed with SHA-256 (bcrypt planned for future)
 - Session tokens with secure cookies
 - Per-user data isolation
 - Optional HTTPS (configure reverse proxy)
-- **Personal/single-machine use** — user data (memories, conversations) is stored as plaintext JSON on disk. Not hardened for hosting for others or multi-tenant deployments.
+- **Encryption at rest** — all sensitive fields in SQLite and JSON sidefiles encrypted with Fernet; key derived from login password, never persisted to disk
+- **Personal/single-machine use** — designed for a single owner; not hardened for hosting for others or multi-tenant deployments
 
 ## Running as a Service
 

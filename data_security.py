@@ -210,7 +210,7 @@ class SecureUserData:
         """
         self.user_id = user_id
         self.encryptor = DataEncryptor(user_key)
-        self.base_path = Path.home() / ".local/share/llm-unified/users" / user_id
+        self.base_path = Path.home() / ".local/share/3am/users" / user_id
     
     def save(self, filename: str, data: Any):
         """Save data to a user file (with encryption if enabled)."""

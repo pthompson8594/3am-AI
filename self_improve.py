@@ -22,7 +22,7 @@ from typing import Optional, Callable, Any
 import httpx
 
 
-DATA_DIR = Path.home() / ".local/share/llm-unified"
+DATA_DIR = Path.home() / ".local/share/3am"
 SUGGESTIONS_FILE = DATA_DIR / "suggestions.json"
 SELF_IMPROVE_CONFIG_FILE = DATA_DIR / "self_improve_config.json"
 CUSTOM_PROMPT_FILE = DATA_DIR / "custom_prompt.txt"

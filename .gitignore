@@ -31,7 +31,7 @@ logs/
 *.bak
 
 # Generated systemd service files (written to project dir by install.sh)
-llm-unified.service
+3am.service
 llama-server.service
 
 # IDE / editor tooling (not for end users)

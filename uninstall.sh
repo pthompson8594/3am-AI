@@ -1,9 +1,9 @@
 #!/bin/bash
 # Uninstall 3AM
 
-INSTALL_DIR="${HOME}/.local/share/llm-unified"
+INSTALL_DIR="${HOME}/.local/share/3am"
 BIN_DIR="${HOME}/.local/bin"
-CONFIG_DIR="${HOME}/.config/llm-unified"
+CONFIG_DIR="${HOME}/.config/3am"
 SYSTEMD_DIR="${HOME}/.config/systemd/user"
 
 # Colors
@@ -14,18 +14,18 @@ NC='\033[0m'
 echo -e "${YELLOW}Uninstalling 3AM...${NC}"
 
 # Stop services
-systemctl --user stop llm-unified 2>/dev/null || true
+systemctl --user stop 3am 2>/dev/null || true
 systemctl --user stop llama-server 2>/dev/null || true
-systemctl --user disable llm-unified 2>/dev/null || true
+systemctl --user disable 3am 2>/dev/null || true
 systemctl --user disable llama-server 2>/dev/null || true
 
 # Remove systemd services
-rm -f "$SYSTEMD_DIR/llm-unified.service"
+rm -f "$SYSTEMD_DIR/3am.service"
 rm -f "$SYSTEMD_DIR/llama-server.service"
 systemctl --user daemon-reload
 
 # Remove launcher
-rm -f "$BIN_DIR/llm-server"
+rm -f "$BIN_DIR/3am"
 
 echo ""
 echo -e "${YELLOW}Remove application files? (keeps user data)${NC}"

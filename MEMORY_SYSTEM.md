@@ -32,4 +32,4 @@ Clusters form autonomously based on "gravitational torque" between embeddings—
 4. **Decay**: Periodic cleanup removes low-retention memories
 5. **Retrieve**: Query by embedding similarity, return relevant clusters for context injection
 
-Data persists to `~/.local/share/llm-unified/users/{user_id}/memory.db` (SQLite).
+Data persists to `~/.local/share/3am/users/{user_id}/memory.db` (SQLite).

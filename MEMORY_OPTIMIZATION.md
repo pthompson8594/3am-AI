@@ -58,7 +58,7 @@ def run_torque_clustering(self, force: bool = False, batch_size: int = 10) -> di
 
 Check logs during clustering:
 ```bash
-journalctl --user -u llm-unified.service -f | grep "Memory"
+journalctl --user -u 3am.service -f | grep "Memory"
 ```
 
 Should see output like:

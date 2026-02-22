@@ -19,7 +19,7 @@ from typing import Optional, Callable, Any
 from dataclasses import dataclass, field
 import threading
 
-DATA_DIR = Path.home() / ".local/share/llm-unified"
+DATA_DIR = Path.home() / ".local/share/3am"
 SCHEDULER_STATE_FILE = DATA_DIR / "scheduler_state.json"
 
 

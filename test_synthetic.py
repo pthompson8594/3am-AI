@@ -25,7 +25,7 @@ from pathlib import Path
 
 # ── Test data directory (isolated from real user data) ───────────────────────
 
-TEST_DIR = Path.home() / ".local/share/llm-unified/test_synthetic"
+TEST_DIR = Path.home() / ".local/share/3am/test_synthetic"
 
 
 # ── Minimal DB bootstrap (mirrors memory.py _init_db, experience_log only) ───
@@ -267,7 +267,7 @@ def main():
         from behavior_profile import BehaviorProfile
     except ImportError as exc:
         print(f"Import error: {exc}")
-        print("Run this script from the llm-unified-mk13/ directory.")
+        print("Run this script from the 3am-AI/ directory.")
         sys.exit(1)
 
     # Fresh log + profile for this run

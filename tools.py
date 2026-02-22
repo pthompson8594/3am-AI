@@ -395,7 +395,7 @@ class ToolExecutor:
         self.last_command = ""
         self.last_output = ""
         self.pending_approval: Optional[PendingApproval] = None
-        self.custom_registry = CustomToolRegistry(data_dir or Path.home() / ".config" / "llm-unified")
+        self.custom_registry = CustomToolRegistry(data_dir or Path.home() / ".config" / "3am")
 
     def get_active_tools(self) -> list[dict]:
         """Return TOOLS + installed custom tool schemas for LLM API calls."""
@@ -623,7 +623,7 @@ class ToolExecutor:
             from pathlib import Path
             
             # Load API key from config
-            config_file = Path.home() / '.config/llm-unified/config.json'
+            config_file = Path.home() / '.config/3am/config.json'
             api_key = os.environ.get("GEMINI_API_KEY", "")
             
             if config_file.exists() and not api_key:

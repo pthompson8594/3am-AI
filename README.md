@@ -157,7 +157,7 @@ The `clustering_adjustment_factor` controls how aggressively clusters split. Aft
 
 ## Data Storage
 
-Everything stays on your machine. Per-user data in `~/.local/share/llm-unified/users/{user_id}/`:
+Everything stays on your machine. Per-user data in `~/.local/share/3am/users/{user_id}/`:
 
 | File | What it holds |
 |------|---------------|

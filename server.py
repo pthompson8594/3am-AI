@@ -40,7 +40,7 @@ from behavior_profile import BehaviorProfile
 
 
 # Configuration
-DATA_DIR = Path.home() / ".local/share/llm-unified"
+DATA_DIR = Path.home() / ".local/share/3am"
 STATIC_DIR = Path(__file__).parent / "static"
 LLM_URL = os.environ.get("LLM_URL", "http://localhost:8080")
 LLM_MODEL = os.environ.get("LLM_MODEL", None)

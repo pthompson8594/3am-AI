@@ -5,9 +5,9 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INSTALL_DIR="${HOME}/.local/share/3am-server"
+INSTALL_DIR="${HOME}/.local/share/3am"
 BIN_DIR="${HOME}/.local/bin"
-CONFIG_DIR="${HOME}/.config/3am-server"
+CONFIG_DIR="${HOME}/.config/3am"
 VENV_DIR="${INSTALL_DIR}/venv"
 SYSTEMD_DIR="${HOME}/.config/systemd/user"
 
@@ -97,7 +97,7 @@ cp "$SCRIPT_DIR/requirements.txt" "$INSTALL_DIR/"
 
 # Create launcher script
 echo -e "${YELLOW}Creating launcher...${NC}"
-cat > "$BIN_DIR/llm-server" << EOF
+cat > "$BIN_DIR/3am" << EOF
 #!/bin/bash
 # 3AM Server Launcher
 
@@ -113,7 +113,7 @@ cd "\$INSTALL_DIR"
 # Start server
 exec python server.py "\$@"
 EOF
-chmod +x "$BIN_DIR/llm-server"
+chmod +x "$BIN_DIR/3am"
 
 # Create config file if not exists
 if [ ! -f "$CONFIG_DIR/config.json" ]; then
@@ -136,14 +136,14 @@ fi
 # Create systemd user service
 echo -e "${YELLOW}Creating systemd service...${NC}"
 mkdir -p "$SYSTEMD_DIR"
-cat > "$SYSTEMD_DIR/3am-server.service" << EOF
+cat > "$SYSTEMD_DIR/3am.service" << EOF
 [Unit]
 Description=3AM Web Server
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=${BIN_DIR}/3am-server
+ExecStart=${BIN_DIR}/3am
 Restart=on-failure
 RestartSec=5
 Environment=LLM_URL=http://localhost:8080
@@ -231,7 +231,7 @@ systemctl --user daemon-reload 2>/dev/null || true
 
 # Create system-wide service files for server deployment
 echo -e "${YELLOW}Creating system service files (for sudo install)...${NC}"
-cat > "$SCRIPT_DIR/3am-server.service" << EOF
+cat > "$SCRIPT_DIR/3am.service" << EOF
 [Unit]
 Description=3AM Web Server
 After=network.target llama-server.service
@@ -241,7 +241,7 @@ Wants=llama-server.service
 Type=simple
 User=$USER
 WorkingDirectory=${INSTALL_DIR}
-ExecStart=${BIN_DIR}/3am-server
+ExecStart=${BIN_DIR}/3am
 Restart=on-failure
 RestartSec=5
 Environment=LLM_URL=http://localhost:8080
@@ -277,23 +277,23 @@ echo ""
 echo -e "${YELLOW}Usage (Desktop - user services):${NC}"
 echo ""
 echo "  Start manually:"
-echo "    llm-server"
+echo "    3am"
 echo ""
 echo "  Start as user service:"
-echo "    systemctl --user enable 3am-server llama-server"
-echo "    systemctl --user start 3am-server llama-server"
+echo "    systemctl --user enable 3am llama-server"
+echo "    systemctl --user start 3am llama-server"
 echo ""
 echo -e "${YELLOW}Usage (Server - system services):${NC}"
 echo ""
 echo "  Install system services:"
 echo "    sudo cp $SCRIPT_DIR/llama-server.service /etc/systemd/system/"
-echo "    sudo cp $SCRIPT_DIR/3am-server.service /etc/systemd/system/"
+echo "    sudo cp $SCRIPT_DIR/3am.service /etc/systemd/system/"
 echo "    sudo systemctl daemon-reload"
-echo "    sudo systemctl enable 3am-server"
-echo "    sudo systemctl start 3am-server"
+echo "    sudo systemctl enable 3am"
+echo "    sudo systemctl start 3am"
 echo ""
 echo "  View logs:"
-echo "    journalctl -u 3am-server -f"
+echo "    journalctl -u 3am -f"
 echo ""
 echo -e "${YELLOW}Firewall (if needed):${NC}"
 echo "    sudo ufw allow 8000/tcp   # Web UI"

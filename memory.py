@@ -29,8 +29,8 @@ import numpy as np
 import sqlite_vec
 from scipy.spatial.distance import cdist
 
-DEFAULT_MEMORY_DIR = Path.home() / ".local/share/llm-unified"
-DEFAULT_CONFIG_DIR = Path.home() / ".config/llm-unified"
+DEFAULT_MEMORY_DIR = Path.home() / ".local/share/3am"
+DEFAULT_CONFIG_DIR = Path.home() / ".config/3am"
 
 CLUSTER_HEALTH_THRESHOLD = 0.35
 MESSAGE_RETENTION_THRESHOLD = 0.35

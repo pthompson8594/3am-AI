@@ -20,7 +20,7 @@ from typing import Optional, Callable, Any
 import httpx
 
 
-DATA_DIR = Path.home() / ".local/share/llm-unified"
+DATA_DIR = Path.home() / ".local/share/3am"
 RESEARCH_FILE = DATA_DIR / "research.json"
 RESEARCH_CONFIG_FILE = DATA_DIR / "research_config.json"
 

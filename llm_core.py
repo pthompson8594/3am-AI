@@ -75,7 +75,7 @@ def parse_inline_tool_calls(content: str) -> tuple[str, list]:
 
 PROJECT_DIR = Path(__file__).parent.parent
 SCRIPTS_DIR = PROJECT_DIR / "scripts"
-DATA_DIR = Path.home() / ".local/share/llm-unified"
+DATA_DIR = Path.home() / ".local/share/3am"
 HISTORY_FILE = DATA_DIR / "history"
 CONVERSATIONS_FILE = DATA_DIR / "conversations.jsonl"
 FEEDBACK_FILE = DATA_DIR / "feedback.jsonl"

@@ -30,7 +30,7 @@ from research import ResearchSystem
 from self_improve import SelfImproveSystem
 
 
-DATA_DIR = Path.home() / ".local/share/llm-unified"
+DATA_DIR = Path.home() / ".local/share/3am"
 ERROR_LOG_FILE = DATA_DIR / "error_journal.json"
 INTROSPECTION_LOG_FILE = DATA_DIR / "introspection_log.json"
 CONSOLIDATION_CONFIG_FILE = DATA_DIR / "consolidation_config.json"

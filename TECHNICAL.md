@@ -161,7 +161,7 @@ Three scenario weeks, each asserting the profile changes (or stays stable) as ex
 | 2 | Low confidence, 70% negative | `search_threshold` drops (system learns to search sooner) |
 | 3 | >15% hallucination tags | `uncertainty_behavior` stays `hedge`, threshold drops further |
 
-Runs in ~2 seconds. Writes to `~/.local/share/llm-unified/test_synthetic/` (isolated from real user data). Useful as a regression check if `update_from_experience()` is ever refactored.
+Runs in ~2 seconds. Writes to `~/.local/share/3am/test_synthetic/` (isolated from real user data). Useful as a regression check if `update_from_experience()` is ever refactored.
 
 ---
 
@@ -492,7 +492,7 @@ pip install umap-learn
 
 ## Data Storage
 
-Per-user data stored in `~/.local/share/llm-unified/users/{user_id}/`:
+Per-user data stored in `~/.local/share/3am/users/{user_id}/`:
 
 | File | Description |
 |------|-------------|
@@ -506,7 +506,7 @@ Per-user data stored in `~/.local/share/llm-unified/users/{user_id}/`:
 | `behavior_profile.json` | **MK13:** Learned behavioral profile (verbosity, thresholds, uncertainty style) |
 | `settings.json` | User preferences (includes MK13: gate enabled, sensitivity, confidence/feedback toggles) |
 
-Global data in `~/.local/share/llm-unified/`:
+Global data in `~/.local/share/3am/`:
 
 | File | Description |
 |------|-------------|
@@ -545,7 +545,7 @@ This downloads Qwen2.5-0.5B (~350MB) for fast testing. Responses are instant but
 
 ## Configuration
 
-Edit `~/.config/llm-unified/config.json`:
+Edit `~/.config/3am/config.json`:
 
 ```json
 {
@@ -745,7 +745,7 @@ distance peaks," IEEE TPAMI, 2025. DOI: 10.1109/TPAMI.2025.3535743
 
 ```bash
 # Create systemd service
-sudo cp llm-unified.service /etc/systemd/system/
-sudo systemctl enable llm-unified
-sudo systemctl start llm-unified
+sudo cp 3am.service /etc/systemd/system/
+sudo systemctl enable 3am
+sudo systemctl start 3am
 ```

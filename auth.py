@@ -24,7 +24,7 @@ import re
 from data_security import SecureUserData, generate_salt
 
 
-DATA_DIR = Path.home() / ".local/share/llm-unified"
+DATA_DIR = Path.home() / ".local/share/3am"
 USERS_FILE = DATA_DIR / "users.json"
 SESSIONS_FILE = DATA_DIR / "sessions.json"
 

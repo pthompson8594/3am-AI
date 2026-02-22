@@ -1,0 +1,41 @@
+# Ignore patterns for Continue agent mode
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+env/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Backup files
+*.backup
+*.bak
+*.old
+
+# Large files
+*.log
+*.sqlite
+*.db
+.coverage
+
+# OS files
+.Thumbs.db
+.DS_Store

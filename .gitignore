@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Environment & secrets
+.env
+.env.*
+
+# Runtime config (user-generated, not tracked)
+.config/
+
+# Runtime data
+*.db
+*.db-shm
+*.db-wal
+logs/
+*.log
+
+# Backup files from development
+*.backup
+*.bak
+
+# Generated systemd service files (written to project dir by install.sh)
+llm-unified.service
+llama-server.service
+
+# IDE / editor tooling (not for end users)
+.continue/
+.vscode/
+.idea/
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db

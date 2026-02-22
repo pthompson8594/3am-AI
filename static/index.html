@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Assistant</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+</head>
+<body>
+    <div id="app">
+        <!-- Auth Screen -->
+        <div id="auth-screen" class="screen">
+            <div class="auth-container">
+                <h1>🤖 LLM Assistant</h1>
+                <p class="subtitle">Your personal AI assistant</p>
+
+                <div class="auth-tabs">
+                    <button class="tab active" data-tab="login">Login</button>
+                    <button class="tab" data-tab="register">Register</button>
+                </div>
+
+                <form id="login-form" class="auth-form">
+                    <input type="text" name="username" placeholder="Username" required autocomplete="username">
+                    <input type="password" name="password" placeholder="Password" required autocomplete="current-password">
+                    <button type="submit">Login</button>
+                    <p class="error-message" id="login-error"></p>
+                </form>
+
+                <form id="register-form" class="auth-form hidden">
+                    <input type="text" name="username" placeholder="Username" required autocomplete="username">
+                    <input type="password" name="password" placeholder="Password (min 8 chars)" required autocomplete="new-password">
+                    <input type="password" name="confirm" placeholder="Confirm Password" required autocomplete="new-password">
+                    <button type="submit">Create Account</button>
+                    <p class="error-message" id="register-error"></p>
+                </form>
+            </div>
+        </div>
+
+        <!-- Main Chat Screen -->
+        <div id="chat-screen" class="screen hidden">
+            <!-- Sidebar -->
+            <aside class="sidebar">
+                <div class="sidebar-header">
+                    <button id="new-chat-btn" class="new-chat-btn">
+                        <span>+</span> New Chat
+                    </button>
+                    <button id="memory-map-btn" class="icon-btn memory-map-open-btn" title="Memory Map">✦</button>
+                    <button id="tools-panel-btn" class="icon-btn" title="Custom Tools">🔧</button>
+                    <button id="research-panel-btn" class="icon-btn" title="Research">🔬</button>
+                </div>
+
+                <div class="sidebar-search">
+                    <input type="text" id="conversation-search" placeholder="Search conversations..." autocomplete="off">
+                </div>
+
+                <div class="sidebar-content">
+                    <div id="conversation-list" class="conversation-list">
+                        <!-- Conversations loaded here -->
+                    </div>
+                </div>
+
+                <div class="sidebar-footer">
+                    <div class="user-info">
+                        <span id="username-display"></span>
+                        <button id="logout-btn" class="icon-btn" title="Logout">⎋</button>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Memory Map Drawer (slides out from sidebar) -->
+            <div id="memory-map-panel" class="memory-map-panel">
+                <div class="memory-map-header">
+                    <div class="memory-map-title-group">
+                        <h3>Memory Map</h3>
+                        <span class="memory-map-subtitle">3D knowledge graph</span>
+                    </div>
+                    <div class="memory-map-header-actions">
+                        <button id="memory-map-refresh-btn" class="icon-btn" title="Refresh data">↺</button>
+                        <button id="memory-map-maximize-btn" class="icon-btn" title="Maximize / Restore">⤢</button>
+                        <button id="close-memory-map-btn" class="icon-btn" title="Close">✕</button>
+                    </div>
+                </div>
+                <div class="memory-map-body">
+                    <div class="memory-map-3d-area">
+                        <div id="memory-map-canvas" class="memory-map-canvas"></div>
+                        <div id="memory-map-labels" class="memory-map-labels"></div>
+                        <div id="memory-map-tooltip" class="memory-map-tooltip hidden"></div>
+                        <div class="memory-map-hint-bar">Drag · Scroll to zoom · Right-drag to pan</div>
+                    </div>
+                    <div class="memory-map-info-panel">
+                        <div id="memory-map-legend" class="memory-map-legend">
+                            <div class="mm-legend-title">Clusters</div>
+                        </div>
+                        <div id="memory-map-detail" class="memory-map-detail">
+                            <div class="mm-hint">Click a cluster label or legend item to inspect its memories</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="memory-map-resizer" title="Drag to resize"></div>
+            </div>
+
+            <!-- Custom Tools Panel (slides out from sidebar) -->
+            <div id="tools-panel" class="tools-panel">
+                <div class="tools-panel-header">
+                    <div class="memory-map-title-group">
+                        <h3>Custom Tools</h3>
+                        <span class="memory-map-subtitle">LLM-created tools</span>
+                    </div>
+                    <button id="close-tools-panel-btn" class="icon-btn" title="Close">✕</button>
+                </div>
+
+                <div class="tools-panel-body">
+                    <!-- Tool lists (populated by JS) -->
+                    <div id="tools-list" class="tools-list">
+                        <div class="tools-loading">Loading tools...</div>
+                    </div>
+
+                    <!-- Propose new tool -->
+                    <div class="tools-propose-section">
+                        <div class="tools-propose-label">Propose New Tool</div>
+                        <div class="tools-propose-row">
+                            <textarea
+                                id="tools-propose-input"
+                                class="tools-propose-input"
+                                placeholder="Describe what you want the tool to do..."
+                                rows="2"
+                            ></textarea>
+                            <button id="tools-propose-btn" class="tools-propose-submit" title="Propose">↑</button>
+                        </div>
+                        <div id="tools-propose-status" class="tools-propose-status hidden"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Research Panel (slides out from sidebar) -->
+            <div id="research-panel" class="research-panel">
+                <div class="research-panel-header">
+                    <div class="memory-map-title-group">
+                        <h3>Research</h3>
+                        <span class="memory-map-subtitle">Proactive findings &amp; topics</span>
+                    </div>
+                    <button id="close-research-panel-btn" class="icon-btn" title="Close">✕</button>
+                </div>
+                <div class="research-panel-body">
+                    <div id="research-list" class="research-list">
+                        <div class="research-loading">Loading...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Main Chat Area -->
+            <main class="chat-main">
+                <div class="chat-header">
+                    <button id="toggle-sidebar" class="icon-btn mobile-only">☰</button>
+                    <h2 id="chat-title">New Chat</h2>
+                    <div class="header-actions">
+                        <div class="viz-legend-container">
+                            <button class="icon-btn viz-legend-btn" aria-label="Visualizer colour guide">◉</button>
+                            <div class="viz-legend-popup" role="tooltip">
+                                <div class="viz-legend-title">Brain visualizer colours</div>
+                                <ul class="viz-legend-list">
+                                    <li><span class="viz-dot" style="background:#2d5591"></span><span><strong>Blue</strong> — Idle, ready for input</span></li>
+                                    <li><span class="viz-dot" style="background:#e6b428"></span><span><strong>Yellow</strong> — Loading your memories</span></li>
+                                    <li><span class="viz-dot" style="background:#f05046"></span><span><strong>Red</strong> — Generating a response</span></li>
+                                    <li><span class="viz-dot" style="background:#a05adc"></span><span><strong>Purple</strong> — Executing a tool</span></li>
+                                    <li><span class="viz-dot" style="background:#32c878"></span><span><strong>Green</strong> — Hourly idle cycle (research &amp; self-improvement)</span></li>
+                                    <li><span class="viz-dot" style="background:#00c8b4"></span><span><strong>Teal</strong> — Memory reorganisation (Torque Clustering)</span></li>
+                                    <li><span class="viz-dot" style="background:#503cdc"></span><span><strong>Indigo</strong> — Nightly memory cycle (3 AM)</span></li>
+                                    <li><span class="viz-dot" style="background:#f58b28"></span><span><strong>Orange</strong> — Decision gate evaluating</span></li>
+                                    <li><span class="viz-dot viz-dot-flash"></span><span><strong>Red flash</strong> — Awaiting your approval</span></li>
+                                </ul>
+                            </div>
+                        </div>
+                        <button id="settings-btn" class="icon-btn" title="Settings">⚙</button>
+                    </div>
+                </div>
+
+                <div id="messages" class="messages">
+                    <div class="welcome-message">
+                        <h2>How can I help you today?</h2>
+                        <p>Ask me anything. I can search the web, run commands, and remember our conversations.</p>
+                    </div>
+                </div>
+
+                <button id="scroll-bottom-btn" class="scroll-bottom-btn hidden" title="Scroll to bottom" aria-label="Scroll to bottom">↓</button>
+
+                <div class="input-area">
+                    <form id="chat-form">
+                        <textarea
+                            id="message-input"
+                            placeholder="Type a message..."
+                            rows="1"
+                            autofocus
+                        ></textarea>
+                        <button type="submit" id="send-btn" title="Send">
+                            <svg viewBox="0 0 24 24" width="24" height="24">
+                                <path fill="currentColor" d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                            </svg>
+                        </button>
+                        <button type="button" id="stop-btn" class="hidden" title="Stop generating">
+                            <svg viewBox="0 0 24 24" width="24" height="24">
+                                <rect fill="currentColor" x="6" y="6" width="12" height="12" rx="2"/>
+                            </svg>
+                        </button>
+                    </form>
+                </div>
+            </main>
+        </div>
+
+        <!-- Settings Modal -->
+        <div id="settings-modal" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Settings</h3>
+                    <button class="close-modal">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="setting-group">
+                        <h4>Research Mode</h4>
+                        <label class="toggle">
+                            <input type="checkbox" id="research-toggle">
+                            <span class="slider"></span>
+                            <span class="label">Enable proactive research</span>
+                        </label>
+                        <p class="hint">The assistant will research your interests during idle time.</p>
+                    </div>
+
+                    <div class="setting-group">
+                        <h4>Self-Improvement</h4>
+                        <label class="toggle">
+                            <input type="checkbox" id="self-improve-toggle">
+                            <span class="slider"></span>
+                            <span class="label">Enable self-improvement suggestions</span>
+                        </label>
+                        <p class="hint">The assistant can suggest ways to improve itself.</p>
+                    </div>
+
+                    <div class="setting-group">
+                        <h4>Web Search Provider</h4>
+                        <select id="search-provider-select" class="setting-select">
+                            <option value="google">Google (via Gemini)</option>
+                            <option value="duckduckgo">DuckDuckGo</option>
+                        </select>
+                        <p class="hint">Choose which search engine to use for web searches.</p>
+                    </div>
+
+                    <div class="setting-group">
+                        <h4>📊 Analytics</h4>
+                        <div id="analytics-panel" class="memory-panel">
+                            <div id="analytics-content">
+                                <span style="color:var(--text-secondary);font-size:0.82rem">Loading...</span>
+                            </div>
+                            <button id="refresh-analytics-btn" class="secondary-btn" style="margin-top:0.75rem">↺ Refresh</button>
+                        </div>
+                        <p class="hint">Live stats from the experience log — how the feedback loop is performing.</p>
+                    </div>
+
+                    <div class="setting-group">
+                        <h4>🗄 Memory Management</h4>
+                        <div class="memory-actions">
+                            <button id="export-memory-btn" class="secondary-btn">Export Memory</button>
+                            <button id="import-memory-btn" class="secondary-btn">Import Memory</button>
+                            <input type="file" id="import-memory-file" accept=".json" class="hidden">
+                        </div>
+                        <button id="delete-memories-btn" class="danger-btn">Delete All Memories</button>
+                        <p class="hint">Export saves all memories as JSON. Import replaces current memories (re-embeds summaries — may take a moment). Delete permanently wipes all stored facts.</p>
+                    </div>
+
+                    <div class="setting-group">
+                        <h4>Decision Gate</h4>
+                        <label class="toggle">
+                            <input type="checkbox" id="decision-gate-toggle" checked>
+                            <span class="slider"></span>
+                            <span class="label">Enable decision gate</span>
+                        </label>
+                        <div class="sensitivity-row">
+                            <label for="gate-sensitivity">Sensitivity</label>
+                            <input type="range" id="gate-sensitivity" min="0" max="1" step="0.05" value="0.5">
+                            <span id="gate-sensitivity-value">0.50</span>
+                        </div>
+                        <p class="hint">Forces the assistant to assess its knowledge before answering. Higher = searches more often.</p>
+                    </div>
+
+                    <div class="setting-group">
+                        <h4>Response Feedback</h4>
+                        <label class="toggle">
+                            <input type="checkbox" id="feedback-toggle" checked>
+                            <span class="slider"></span>
+                            <span class="label">Show feedback buttons on responses</span>
+                        </label>
+                        <div id="feedback-stats" class="feedback-stats-block"></div>
+                        <p class="hint">Thumbs up/down on each response. Feedback improves future tool and search decisions.</p>
+                    </div>
+
+                    <div class="setting-group">
+                        <h4>Confidence Display</h4>
+                        <label class="toggle">
+                            <input type="checkbox" id="confidence-toggle" checked>
+                            <span class="slider"></span>
+                            <span class="label">Show confidence indicator on responses</span>
+                        </label>
+                        <p class="hint">Colour-coded dot (green/yellow/red) based on real token probabilities from the model.</p>
+                    </div>
+
+                    <div class="setting-group">
+                        <h4>Account</h4>
+                        <button id="change-password-btn" class="secondary-btn">Change Password</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/neural-visualizer.js"></script>
+    <script src="/static/js/app.js"></script>
+    <script type="module" src="/static/js/memory-map.js"></script>
+</body>
+</html>

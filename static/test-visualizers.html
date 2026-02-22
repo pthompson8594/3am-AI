@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Neural Visualizer Samples</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            background: #1a1a2e; 
+            color: #fff; 
+            font-family: system-ui, sans-serif;
+            min-height: 100vh;
+        }
+        .controls {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 100;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        button {
+            padding: 10px 20px;
+            background: #333;
+            color: #fff;
+            border: 1px solid #555;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        button:hover { background: #444; }
+        button.active { background: #4a6fa5; border-color: #6a9fd5; }
+        .activity-control {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 100;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+        }
+        input[type="range"] {
+            width: 200px;
+        }
+        canvas {
+            position: fixed;
+            top: 0;
+            left: 0;
+        }
+        .label {
+            position: fixed;
+            bottom: 60px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 12px;
+            color: #888;
+        }
+    </style>
+</head>
+<body>
+    <div class="controls">
+        <button onclick="setMode('blob')" id="btn-blob" class="active">Original Blob</button>
+        <button onclick="setMode('tokens')" id="btn-tokens">Token Stream</button>
+        <button onclick="setMode('waves')" id="btn-waves">Attention Waves</button>
+        <button onclick="setMode('layers')" id="btn-layers">Layer Propagation</button>
+        <button onclick="setMode('clusters')" id="btn-clusters">Embedding Clusters</button>
+        <button onclick="setMode('context')" id="btn-context">Context Window</button>
+        <button onclick="setMode('pathways')" id="btn-pathways">Neural Pathways</button>
+    </div>
+    
+    <div class="label">Drag slider to simulate LLM activity</div>
+    
+    <div class="activity-control">
+        <span>Idle</span>
+        <input type="range" id="activity" min="0" max="100" value="0" oninput="setActivity(this.value)">
+        <span>Thinking</span>
+        <button onclick="pulse()">Pulse</button>
+    </div>
+
+    <script>
+    // ========================================================================
+    // TEST HARNESS - Unified visualizer with switchable modes
+    // ========================================================================
+    
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    document.body.appendChild(canvas);
+    
+    let width, height;
+    let time = 0;
+    let activity = 0;
+    let targetActivity = 0;
+    let currentMode = 'blob';
+    
+    // Grid settings
+    const gridCols = 60;
+    const gridRows = 60;
+    let pixels = [];
+    let gridSize, pixelSize, centerX, centerY;
+    
+    // Colors
+    const idleColor = { r: 45, g: 85, b: 145 };
+    const activeColor = { r: 240, g: 80, b: 70 };
+    
+    // Mode-specific state
+    let tokens = [];
+    let waves = [];
+    let focusPoints = [];
+    let layerStates = new Array(8).fill(0);
+    let propagationPhase = 0;
+    let clusters = [];
+    let contextTokens = new Array(32).fill(0);
+    let contextWriteHead = 0;
+    let contextWriteTimer = 0;
+    let nodes = [];
+    let signals = [];
+    
+    function resize() {
+        width = canvas.width = window.innerWidth;
+        height = canvas.height = window.innerHeight;
+        gridSize = Math.min(width, height) * 0.6;
+        pixelSize = gridSize / gridCols;
+        centerX = width / 2;
+        centerY = height / 2;
+    }
+    
+    function createGrid() {
+        pixels = [];
+        for (let row = 0; row < gridRows; row++) {
+            pixels[row] = [];
+            for (let col = 0; col < gridCols; col++) {
+                const nx = (col - gridCols / 2) / (gridCols / 2);
+                const ny = (row - gridRows / 2) / (gridRows / 2);
+                pixels[row][col] = {
+                    nx, ny,
+                    dist: Math.sqrt(nx * nx + ny * ny),
+                    angle: Math.atan2(ny, nx),
+                    noise: Math.random() * 1000,
+                };
+            }
+        }
+    }
+    
+    function initNodes() {
+        nodes = [];
+        for (let i = 0; i < 12; i++) {
+            const angle = (i / 12) * Math.PI * 2;
+            const radius = 0.3 + Math.random() * 0.3;
+            nodes.push({
+                x: Math.cos(angle) * radius,
+                y: Math.sin(angle) * radius,
+                connections: [],
+                activity: 0,
+            });
+        }
+        for (let i = 0; i < nodes.length; i++) {
+            for (let j = 0; j < 2; j++) {
+                const target = Math.floor(Math.random() * nodes.length);
+                if (target !== i) nodes[i].connections.push(target);
+            }
+        }
+    }
+    
+    function noise(x, y, t) {
+        const n1 = Math.sin(x * 2.5 + t) * Math.cos(y * 2.5 + t * 0.7);
+        const n2 = Math.sin(x * 1.3 - t * 0.5) * Math.sin(y * 1.8 + t * 0.3);
+        return (n1 + n2) / 2;
+    }
+    
+    function lerpColor(c1, c2, t) {
+        t = Math.max(0, Math.min(1, t));
+        return {
+            r: Math.round(c1.r + (c2.r - c1.r) * t),
+            g: Math.round(c1.g + (c2.g - c1.g) * t),
+            b: Math.round(c1.b + (c2.b - c1.b) * t),
+        };
+    }
+    
+    // ========================================================================
+    // MODE UPDATES
+    // ========================================================================
+    
+    function updateTokens() {
+        if (activity > 0.2 && Math.random() < 0.1 * activity && tokens.length < 30) {
+            tokens.push({
+                x: -0.6,
+                y: (Math.random() - 0.5) * 0.8,
+                speed: 0.008 + Math.random() * 0.012,
+                size: 0.04 + Math.random() * 0.03,
+                brightness: 0.7 + Math.random() * 0.3,
+                phase: Math.random() * Math.PI * 2,
+            });
+        }
+        tokens = tokens.filter(t => {
+            t.x += t.speed * (0.5 + activity * 0.5);
+            t.phase += 0.1;
+            return t.x < 0.7;
+        });
+    }
+    
+    function updateWaves() {
+        if (activity > 0.3 && Math.random() < 0.03 * activity && waves.length < 5) {
+            waves.push({
+                radius: 0,
+                maxRadius: 0.8 + Math.random() * 0.4,
+                speed: 0.01 + Math.random() * 0.01,
+                thickness: 0.06,
+                brightness: 0.6 + Math.random() * 0.4,
+            });
+        }
+        waves = waves.filter(w => {
+            w.radius += w.speed;
+            w.life = 1 - (w.radius / w.maxRadius);
+            return w.radius < w.maxRadius;
+        });
+        
+        if (activity > 0.5 && Math.random() < 0.03) {
+            focusPoints.push({
+                x: (Math.random() - 0.5) * 1.2,
+                y: (Math.random() - 0.5) * 1.2,
+                life: 1.0,
+                phase: 0,
+            });
+        }
+        focusPoints = focusPoints.filter(p => {
+            p.life -= 0.02;
+            p.phase += 0.2;
+            return p.life > 0;
+        });
+    }
+    
+    function updateLayers() {
+        if (activity > 0.3) {
+            propagationPhase += 0.05 * activity;
+            for (let i = 0; i < 8; i++) {
+                const wave = Math.sin(propagationPhase - i * 0.3);
+                layerStates[i] = Math.max(0, wave) * activity;
+            }
+        } else {
+            for (let i = 0; i < 8; i++) layerStates[i] *= 0.95;
+        }
+    }
+    
+    function updateClusters() {
+        if (clusters.length < 6 && Math.random() < 0.01) {
+            clusters.push({
+                x: (Math.random() - 0.5) * 0.8,
+                y: (Math.random() - 0.5) * 0.8,
+                vx: (Math.random() - 0.5) * 0.002,
+                vy: (Math.random() - 0.5) * 0.002,
+                radius: 0.1 + Math.random() * 0.15,
+                brightness: 0.5 + Math.random() * 0.5,
+                life: 1.0,
+                phase: Math.random() * Math.PI * 2,
+            });
+        }
+        clusters = clusters.filter(c => {
+            c.x += c.vx * (0.5 + activity);
+            c.y += c.vy * (0.5 + activity);
+            c.phase += 0.02;
+            if (Math.abs(c.x) > 0.6) c.vx *= -1;
+            if (Math.abs(c.y) > 0.6) c.vy *= -1;
+            c.life -= 0.001;
+            return c.life > 0;
+        });
+    }
+    
+    function updateContext() {
+        for (let i = 0; i < 32; i++) contextTokens[i] *= 0.995;
+        if (activity > 0.3) {
+            contextWriteTimer += activity * 0.1;
+            if (contextWriteTimer > 1) {
+                contextWriteTimer = 0;
+                contextTokens[contextWriteHead] = 0.8 + Math.random() * 0.2;
+                contextWriteHead = (contextWriteHead + 1) % 32;
+            }
+        }
+    }
+    
+    function updatePathways() {
+        for (const node of nodes) node.activity *= 0.95;
+        
+        if (activity > 0.3 && signals.length < 20 && Math.random() < 0.1 * activity) {
+            const srcIdx = Math.floor(Math.random() * nodes.length);
+            const src = nodes[srcIdx];
+            if (src.connections.length > 0) {
+                const tgtIdx = src.connections[Math.floor(Math.random() * src.connections.length)];
+                const tgt = nodes[tgtIdx];
+                signals.push({
+                    fromX: src.x, fromY: src.y,
+                    toX: tgt.x, toY: tgt.y,
+                    progress: 0,
+                    speed: 0.02 + Math.random() * 0.02,
+                    brightness: 0.8 + Math.random() * 0.2,
+                    targetNode: tgtIdx,
+                });
+                src.activity = 1;
+            }
+        }
+        signals = signals.filter(s => {
+            s.progress += s.speed;
+            if (s.progress >= 1) {
+                nodes[s.targetNode].activity = 1;
+                return false;
+            }
+            return true;
+        });
+    }
+    
+    // ========================================================================
+    // MODE INFLUENCE GETTERS
+    // ========================================================================
+    
+    function getTokenInfluence(nx, ny) {
+        let inf = 0;
+        for (const t of tokens) {
+            const dx = nx - t.x, dy = ny - t.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist < t.size * 2) {
+                const pulse = Math.sin(t.phase) * 0.2 + 0.8;
+                inf += t.brightness * pulse * Math.max(0, 1 - dist / (t.size * 2));
+            }
+        }
+        return Math.min(1, inf);
+    }
+    
+    function getWaveInfluence(nx, ny) {
+        const dist = Math.sqrt(nx*nx + ny*ny);
+        let inf = 0;
+        for (const w of waves) {
+            const ringDist = Math.abs(dist - w.radius);
+            if (ringDist < w.thickness) {
+                inf += w.brightness * w.life * (1 - ringDist / w.thickness);
+            }
+        }
+        for (const p of focusPoints) {
+            const dx = nx - p.x, dy = ny - p.y;
+            const pDist = Math.sqrt(dx*dx + dy*dy);
+            if (pDist < 0.15) {
+                const pulse = Math.sin(p.phase) * 0.3 + 0.7;
+                inf += p.life * pulse * (1 - pDist / 0.15);
+            }
+        }
+        return Math.min(1, inf);
+    }
+    
+    function getLayerInfluence(ny) {
+        const layerIdx = Math.floor((ny + 1) / (2 / 8));
+        if (layerIdx >= 0 && layerIdx < 8) return layerStates[layerIdx];
+        return 0;
+    }
+    
+    function getClusterInfluence(nx, ny) {
+        let inf = 0;
+        for (const c of clusters) {
+            const dx = nx - c.x, dy = ny - c.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist < c.radius) {
+                const breathing = Math.sin(c.phase) * 0.15 + 0.85;
+                inf += c.brightness * c.life * (1 - dist / c.radius) * breathing;
+            }
+        }
+        return Math.min(1, inf);
+    }
+    
+    function getContextInfluence(angle, dist) {
+        const normAngle = (angle + Math.PI) / (2 * Math.PI);
+        const slot = Math.floor(normAngle * 32) % 32;
+        if (dist > 0.4 && dist < 0.8) {
+            return contextTokens[slot] * (1 - Math.abs(dist - 0.6) / 0.2);
+        }
+        return 0;
+    }
+    
+    function getPathwayInfluence(nx, ny) {
+        let inf = 0;
+        for (const node of nodes) {
+            const dx = nx - node.x, dy = ny - node.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist < 0.08) inf += (0.3 + node.activity * 0.7) * (1 - dist / 0.08);
+        }
+        for (const s of signals) {
+            const sx = s.fromX + (s.toX - s.fromX) * s.progress;
+            const sy = s.fromY + (s.toY - s.fromY) * s.progress;
+            const dx = nx - sx, dy = ny - sy;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist < 0.06) inf += s.brightness * (1 - dist / 0.06);
+        }
+        return Math.min(1, inf);
+    }
+    
+    // ========================================================================
+    // MAIN ANIMATION
+    // ========================================================================
+    
+    function animate() {
+        ctx.fillStyle = '#1a1a2e';
+        ctx.fillRect(0, 0, width, height);
+        
+        time += 0.015;
+        
+        // Smooth activity transition
+        if (activity < targetActivity) activity = Math.min(targetActivity, activity + 0.03);
+        else if (activity > targetActivity) activity = Math.max(targetActivity, activity - 0.01);
+        
+        // Update mode-specific state
+        switch (currentMode) {
+            case 'tokens': updateTokens(); break;
+            case 'waves': updateWaves(); break;
+            case 'layers': updateLayers(); break;
+            case 'clusters': updateClusters(); break;
+            case 'context': updateContext(); break;
+            case 'pathways': updatePathways(); break;
+        }
+        
+        // Draw grid
+        const startX = centerX - gridSize / 2;
+        const startY = centerY - gridSize / 2;
+        
+        for (let row = 0; row < gridRows; row++) {
+            for (let col = 0; col < gridCols; col++) {
+                const p = pixels[row][col];
+                
+                // Base blob shape
+                const blobDistort = noise(p.angle * 2, p.dist, time * 0.8) * 0.25;
+                const morphWave = Math.sin(p.angle * 3 + time * 0.4) * 0.1;
+                const distortedDist = p.dist - blobDistort - morphWave;
+                const blobMask = Math.max(0, 1 - distortedDist);
+                const mask = blobMask * blobMask;
+                
+                if (mask < 0.01) continue;
+                
+                // Base idle glow
+                const breath = (Math.sin(time * 0.8 + p.noise) + 1) / 2;
+                let intensity = (1 - p.dist * 0.5) * (0.4 + breath * 0.2);
+                
+                // Add mode-specific effect
+                let modeIntensity = 0;
+                switch (currentMode) {
+                    case 'tokens':
+                        modeIntensity = getTokenInfluence(p.nx, p.ny);
+                        break;
+                    case 'waves':
+                        modeIntensity = getWaveInfluence(p.nx, p.ny);
+                        break;
+                    case 'layers':
+                        modeIntensity = getLayerInfluence(p.ny);
+                        break;
+                    case 'clusters':
+                        modeIntensity = getClusterInfluence(p.nx, p.ny);
+                        break;
+                    case 'context':
+                        modeIntensity = getContextInfluence(p.angle, p.dist);
+                        break;
+                    case 'pathways':
+                        modeIntensity = getPathwayInfluence(p.nx, p.ny);
+                        break;
+                }
+                
+                intensity = intensity * (1 - activity * 0.5) + modeIntensity * activity;
+                intensity *= mask;
+                
+                if (intensity < 0.02) continue;
+                
+                const color = lerpColor(idleColor, activeColor, modeIntensity);
+                const x = startX + col * pixelSize;
+                const y = startY + row * pixelSize;
+                
+                ctx.fillStyle = `rgba(${color.r}, ${color.g}, ${color.b}, ${intensity * 0.8})`;
+                ctx.fillRect(x, y, pixelSize - 1, pixelSize - 1);
+            }
+        }
+        
+        requestAnimationFrame(animate);
+    }
+    
+    // ========================================================================
+    // CONTROLS
+    // ========================================================================
+    
+    function setMode(mode) {
+        currentMode = mode;
+        document.querySelectorAll('.controls button').forEach(b => b.classList.remove('active'));
+        document.getElementById('btn-' + mode).classList.add('active');
+        
+        // Reset mode state
+        tokens = []; waves = []; focusPoints = []; clusters = []; signals = [];
+        contextTokens = new Array(32).fill(0);
+        if (mode === 'pathways') initNodes();
+    }
+    window.setMode = setMode;
+    
+    function setActivity(value) {
+        targetActivity = value / 100;
+    }
+    window.setActivity = setActivity;
+    
+    function pulse() {
+        targetActivity = 1;
+        setTimeout(() => { targetActivity = 0; }, 2000);
+    }
+    window.pulse = pulse;
+    
+    // Init
+    resize();
+    createGrid();
+    initNodes();
+    window.addEventListener('resize', resize);
+    animate();
+    </script>
+</body>
+</html>

@@ -1,0 +1,54 @@
+# Web framework
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+
+# HTTP client
+httpx>=0.26.0
+
+# Async support
+anyio>=4.2.0
+
+# Data validation
+pydantic>=2.5.0
+
+# Password hashing (for production)
+# bcrypt>=4.1.0
+
+# Encryption (for future)
+# cryptography>=41.0.0
+
+# Embeddings (from MK7)
+# Note: Install CPU-only torch first on low-RAM systems:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+numpy>=1.24.0
+sentence-transformers>=3.0.0
+einops>=0.8.0  # Required by nomic embedding model
+
+# Vector database (MK11)
+sqlite-vec>=0.1.6  # SQLite extension for native vector similarity search
+
+# Torque Clustering dependencies (MK10)
+scipy>=1.10.0
+networkx>=3.0
+matplotlib>=3.7.0  # For optional decision graph visualization
+
+# Web search via Gemini
+google-genai>=1.0.0
+
+# Web search via DuckDuckGo
+duckduckgo-search>=7.0.0
+
+# System info
+psutil>=5.9.0
+
+# HTML parsing for web search
+beautifulsoup4>=4.12.0
+
+# Scheduling
+apscheduler>=3.10.0
+
+# 3D memory map dimensionality reduction (optional but recommended)
+# Falls back to numpy PCA if not installed
+umap-learn>=0.5.0

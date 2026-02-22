@@ -806,6 +806,9 @@ window._openMemoryMap = function () {
     const panel = document.getElementById('memory-map-panel');
     if (!panel) return;
 
+    // Close any other open panels first
+    window._closeAllPanels?.();
+
     // Slide in
     panel.classList.add('open');
 

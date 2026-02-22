@@ -79,6 +79,7 @@ class App {
         document.getElementById('new-chat-btn').addEventListener('click', () => this.newChat());
         document.getElementById('logout-btn').addEventListener('click', () => this.logout());
         document.getElementById('toggle-sidebar').addEventListener('click', () => this.toggleSidebar());
+        document.getElementById('sidebar-close-btn').addEventListener('click', () => this.closeSidebar());
 
         // Settings
         document.getElementById('settings-btn').addEventListener('click', () => this.openSettings());
@@ -981,6 +982,16 @@ class App {
         document.querySelector('.sidebar').classList.toggle('open');
     }
 
+    closeSidebar() {
+        document.querySelector('.sidebar').classList.remove('open');
+    }
+
+    _closeAllPanels() {
+        document.getElementById('tools-panel').classList.remove('open');
+        document.getElementById('research-panel').classList.remove('open');
+        document.getElementById('memory-map-panel')?.classList.remove('open');
+    }
+
     async openSettings() {
         document.getElementById('settings-modal').classList.remove('hidden');
         await this.loadSettings();
@@ -1391,6 +1402,7 @@ class App {
     }
 
     openToolsPanel() {
+        this._closeAllPanels();
         document.getElementById('tools-panel').classList.add('open');
         this.loadTools();
     }
@@ -1559,6 +1571,7 @@ class App {
     }
 
     openResearchPanel() {
+        this._closeAllPanels();
         document.getElementById('research-panel').classList.add('open');
         this.loadResearch();
     }
@@ -1673,4 +1686,5 @@ class App {
 // Initialize app
 document.addEventListener('DOMContentLoaded', () => {
     window.app = new App();
+    window._closeAllPanels = () => window.app._closeAllPanels();
 });

@@ -189,7 +189,7 @@ Swap models by changing the server URL. The system auto-detects whatever `/v1/mo
 
 ## Security & Privacy
 
-- All data stored locally as plaintext (designed for single-machine personal use)
+- All data stored locally with Fernet encryption at rest (designed for single-machine personal use)
 - Passwords hashed with bcrypt
 - Session tokens with secure cookies
 - Per-user data isolation

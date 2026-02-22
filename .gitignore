@@ -43,6 +43,9 @@ llama-server.service
 # Personal deployment scripts (local use only)
 sync-3am.sh
 
+# Generated documentation (PDF built locally from MANUAL.md)
+MANUAL.pdf
+
 # OS
 .DS_Store
 Thumbs.db

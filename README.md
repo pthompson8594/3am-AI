@@ -189,10 +189,10 @@ Swap models by changing the server URL. The system auto-detects whatever `/v1/mo
 
 ## Security & Privacy
 
-- All data stored locally with Fernet encryption at rest (designed for single-machine personal use)
+- All data stored locally with Fernet encryption at rest
+- Multi-user support with full per-user isolation — separate encrypted stores, separate keys derived from each user's password, no cross-user data access
 - Passwords hashed with bcrypt
 - Session tokens with secure cookies
-- Per-user data isolation
 - No telemetry, no external API calls (except user-approved web searches)
 - **Your conversations never leave your machine**
 

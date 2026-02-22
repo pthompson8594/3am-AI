@@ -70,6 +70,14 @@ html, body {
     margin-bottom: 0.5rem;
 }
 
+.auth-logo {
+    width: 200px;
+    height: 200px;
+    object-fit: contain;
+    margin-bottom: 0.25rem;
+    border-radius: 16px;
+}
+
 .subtitle {
     color: var(--text-secondary);
     margin-bottom: 2rem;
@@ -172,6 +180,14 @@ html, body {
 .sidebar-header {
     padding: 1rem;
     border-bottom: 1px solid var(--border-color);
+}
+
+.sidebar-logo {
+    width: 32px;
+    height: 32px;
+    object-fit: contain;
+    border-radius: 6px;
+    flex-shrink: 0;
 }
 
 .new-chat-btn {

@@ -1,5 +1,9 @@
 # 3AM
 
+<p align="center">
+  <img src="3am-logo.png" alt="3AM" width="180">
+</p>
+
 **A self-evolving local AI that learns while you sleep.**
 
 3AM is a fully local AI assistant that doesn't just answer questions — it remembers you, researches your interests, builds its own tools, and adapts its behavior over time. Everything runs on your hardware. No API keys, no cloud, no one training on your conversations.

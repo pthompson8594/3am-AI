@@ -161,14 +161,13 @@ class ResearchTopic:
 
 @dataclass
 class Insight:
-    """A researched insight to share with the user."""
+    """A researched insight stored in the research file."""
     topic: str
     fact: str
     why_interesting: str
     confidence: float
     researched_at: float
-    shared: bool = False
-    
+
     def to_dict(self) -> dict:
         return {
             "topic": self.topic,
@@ -176,12 +175,11 @@ class Insight:
             "why_interesting": self.why_interesting,
             "confidence": self.confidence,
             "researched_at": self.researched_at,
-            "shared": self.shared,
         }
-    
+
     @classmethod
     def from_dict(cls, data: dict) -> "Insight":
-        return cls(**data)
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
 @dataclass 
@@ -267,21 +265,15 @@ class ResearchSystem:
             self.on_status(f"[Research] Load error: {e}")
 
     def _purge_stale_insights(self) -> int:
-        """Remove insights from memory that are old enough to have decayed.
+        """Remove insights older than 30 days from the research file.
 
-        Shared insights expire after 7 days (they're in memory already).
-        Unshared insights expire after 30 days (generous window to surface them).
+        Facts are written into memory during research, so keeping them in
+        research.json beyond 30 days is redundant.
         Returns the number of insights removed.
         """
-        now = time.time()
-        shared_cutoff   = now - 7  * 86400
-        unshared_cutoff = now - 30 * 86400
+        cutoff = time.time() - 30 * 86400
         before = len(self.insights)
-        self.insights = [
-            i for i in self.insights
-            if (i.shared and i.researched_at >= shared_cutoff)
-            or (not i.shared and i.researched_at >= unshared_cutoff)
-        ]
+        self.insights = [i for i in self.insights if i.researched_at >= cutoff]
         return before - len(self.insights)
 
     def _save(self):
@@ -595,37 +587,13 @@ class ResearchSystem:
         
         return results
     
-    def get_unshared_insights(self, topic: Optional[str] = None, limit: int = 3) -> list[Insight]:
-        """Get insights that haven't been shared with the user yet."""
-        unshared = [i for i in self.insights if not i.shared]
-        
+    def get_recent_insights(self, topic: Optional[str] = None, limit: int = 3) -> list[Insight]:
+        """Get the most recent insights, optionally filtered by topic."""
+        results = list(self.insights)
         if topic:
-            unshared = [i for i in unshared if topic.lower() in i.topic.lower()]
-        
-        # Sort by confidence and recency
-        unshared.sort(key=lambda i: (i.confidence, i.researched_at), reverse=True)
-        
-        return unshared[:limit]
-    
-    def mark_insight_shared(self, insight: Insight):
-        """Mark an insight as shared."""
-        insight.shared = True
-        self._save()
-    
-    def get_relevant_insight(self, query: str) -> Optional[Insight]:
-        """Get a relevant unshared insight for a query."""
-        query_lower = query.lower()
-        
-        for insight in self.insights:
-            if insight.shared:
-                continue
-            
-            # Simple keyword matching
-            topic_words = insight.topic.lower().split()
-            if any(word in query_lower for word in topic_words if len(word) > 3):
-                return insight
-        
-        return None
+            results = [i for i in results if topic.lower() in i.topic.lower()]
+        results.sort(key=lambda i: (i.confidence, i.researched_at), reverse=True)
+        return results[:limit]
     
     def add_manual_topic(self, topic_name: str, search_query: Optional[str] = None):
         """Manually add a topic to research."""
@@ -666,7 +634,6 @@ class ResearchSystem:
             "total_topics": len(self.topics),
             "researched_topics": len([t for t in self.topics if t.researched]),
             "total_insights": len(self.insights),
-            "unshared_insights": len([i for i in self.insights if not i.shared]),
         }
     
     def get_findings_summary(self) -> str:
@@ -677,22 +644,20 @@ class ResearchSystem:
         lines = [
             "=== Research Findings ===",
             f"Total insights: {len(self.insights)}",
-            f"Unshared: {len([i for i in self.insights if not i.shared])}",
             "",
         ]
-        
+
         # Group by topic
         by_topic = {}
         for insight in self.insights:
             if insight.topic not in by_topic:
                 by_topic[insight.topic] = []
             by_topic[insight.topic].append(insight)
-        
+
         for topic, insights in list(by_topic.items())[:5]:
             lines.append(f"📚 {topic}")
             for insight in insights[:2]:
-                shared_mark = "✓" if insight.shared else "○"
-                lines.append(f"  {shared_mark} {insight.fact[:80]}...")
+                lines.append(f"  • {insight.fact[:80]}...")
             lines.append("")
         
         return "\n".join(lines)
@@ -709,33 +674,30 @@ class ResearchSystem:
             "RESEARCH FINDINGS - COMPLETE EXPORT",
             f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             f"Total insights: {len(self.insights)}",
-            f"Shared: {len([i for i in self.insights if i.shared])}",
-            f"Unshared: {len([i for i in self.insights if not i.shared])}",
             "=" * 60,
             "",
         ]
-        
+
         # Group by topic
         by_topic = {}
         for insight in self.insights:
             if insight.topic not in by_topic:
                 by_topic[insight.topic] = []
             by_topic[insight.topic].append(insight)
-        
+
         for topic, insights in by_topic.items():
             lines.append("-" * 40)
             lines.append(f"📚 {topic} ({len(insights)} insights)")
             lines.append("-" * 40)
-            
+
             for i, insight in enumerate(insights, 1):
-                shared_mark = "✓ SHARED" if insight.shared else "○ UNSHARED"
                 research_date = datetime.fromtimestamp(insight.researched_at).strftime('%Y-%m-%d %H:%M')
-                
-                lines.append(f"\n[{i}] {shared_mark} - {research_date}")
+
+                lines.append(f"\n[{i}] {research_date}")
                 lines.append(f"Fact: {insight.fact}")
                 lines.append(f"Why interesting: {insight.why_interesting}")
                 lines.append(f"Confidence: {insight.confidence}")
-            
+
             lines.append("")
         
         lines.append("=" * 60)

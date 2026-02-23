@@ -41,7 +41,7 @@ Before generating a response, the system evaluates whether it actually knows eno
 Every response is logged with its confidence score, gate decision, and your feedback (👍/👎 with optional tags like "hallucinated" or "too verbose"). Nightly, the system analyzes a full day of these patterns and adjusts its behavior profile — when to search, when to hedge, how verbose to be. It learns from its mistakes without changing a single weight.
 
 ### Proactive Research
-The system autonomously researches topics you've discussed, bringing back current information during idle hours. Research topics require your approval before being added. Results are browsable and deletable through the UI.
+The system autonomously researches topics you've discussed, bringing back current information during idle hours. A four-layer decision gate prevents over-research: only clusters with recent activity are considered, topic generation is rate-limited to once every 5 days, topics that yield poor results are backed off for a week, and the cooldown shortens automatically when the AI has been giving low-confidence answers. Research findings are written into long-term memory and expire from the research file after 30 days. Results are browsable and deletable through the UI.
 
 ### 3D Memory Visualization
 A live star-map shows your memory space — clusters as suns, individual memories as orbiting planets. Useful for spotting cluster health, interesting for understanding how your AI organizes what it knows about you.

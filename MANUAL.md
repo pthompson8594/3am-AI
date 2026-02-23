@@ -636,9 +636,21 @@ See [Chat Commands Reference](#chat-commands-reference) for the full list.
 **Key behaviors:**
 - Topics discovered from conversation clusters automatically
 - Manual topics via `?learn <topic>` or UI
-- Daily quota to limit API usage
-- Research findings stored in `research.json` (encrypted)
+- Daily quota to limit API usage (default: 5 searches/day)
+- Research findings stored in `research.json` (encrypted) and written into long-term memory
 - High-confidence findings (≥0.8) stored as priority-3 memories; others as priority-2
+- Findings expire from `research.json` after 30 days (already in memory by then)
+
+**Four-layer decision gate — controls when topic scanning runs:**
+
+| Gate | Condition | Effect |
+|------|-----------|--------|
+| 1 — Cluster recency | Cluster has no new memories in the last 14 days | Skip that cluster |
+| 2 — Topic cooldown | `identify_topics()` was called within the last 5 days | Skip topic scan entirely |
+| 3 — Poor results backoff | Last research on a topic had 0 useful insights or `search_quality == "poor"` | Back off that topic's cluster for 7 days |
+| 4 — Experience signal | `low_conf_negative_rate > 0.25` in experience log | Halve the Gate 2 cooldown (2.5 days) |
+
+Gates 1–3 are bypassed when the user manually queues a topic via `?learn`. Gate 2 countdown resets after each LLM call to `identify_topics()` regardless of whether new topics were found.
 
 ---
 

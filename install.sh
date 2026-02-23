@@ -209,7 +209,7 @@ case "$GPU_TYPE" in
     *)      GPU_LAYERS=0  ; CTX=8192  ; PARALLEL=1 ;;
 esac
 # YaRN flags allow context up to 131072 at runtime (increase CTX above if VRAM permits)
-YARN_FLAGS="--rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 32768 --flash-attn"
+YARN_FLAGS="--rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 32768 --flash-attn on"
 echo -e "${GREEN}GPU type: ${GPU_TYPE} — using --n-gpu-layers ${GPU_LAYERS}${NC}"
 
 # Create LLM server service

@@ -77,6 +77,6 @@ llama-server \
     --rope-scaling yarn \
     --rope-scale 4 \
     --yarn-orig-ctx 32768 \
-    --flash-attn \
+    --flash-attn on \
     --threads 12 \
     --host 0.0.0.0

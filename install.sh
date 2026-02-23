@@ -203,11 +203,13 @@ detect_gpu_layers() {
 
 GPU_TYPE=$(detect_gpu_layers)
 case "$GPU_TYPE" in
-    nvidia) GPU_LAYERS=99 ; CTX=16384 ; PARALLEL=4 ;;
-    amd)    GPU_LAYERS=999; CTX=8192  ; PARALLEL=2 ;;
-    vulkan) GPU_LAYERS=999; CTX=8192  ; PARALLEL=2 ;;
-    *)      GPU_LAYERS=0  ; CTX=4096  ; PARALLEL=1 ;;
+    nvidia) GPU_LAYERS=99 ; CTX=32768 ; PARALLEL=4 ;;
+    amd)    GPU_LAYERS=999; CTX=32768 ; PARALLEL=2 ;;
+    vulkan) GPU_LAYERS=999; CTX=32768 ; PARALLEL=2 ;;
+    *)      GPU_LAYERS=0  ; CTX=8192  ; PARALLEL=1 ;;
 esac
+# YaRN flags allow context up to 131072 at runtime (increase CTX above if VRAM permits)
+YARN_FLAGS="--rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 32768 --flash-attn"
 echo -e "${GREEN}GPU type: ${GPU_TYPE} — using --n-gpu-layers ${GPU_LAYERS}${NC}"
 
 # Create LLM server service
@@ -218,7 +220,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${LLAMA_SERVER} --model ${HOME}/models/${PROD_MODEL} --port 8080 --host 0.0.0.0 --n-gpu-layers ${GPU_LAYERS} --ctx-size ${CTX} --parallel ${PARALLEL}
+ExecStart=${LLAMA_SERVER} --model ${HOME}/models/${PROD_MODEL} --port 8080 --host 0.0.0.0 --n-gpu-layers ${GPU_LAYERS} --ctx-size ${CTX} --parallel ${PARALLEL} ${YARN_FLAGS}
 Restart=on-failure
 RestartSec=10
 
@@ -258,7 +260,7 @@ After=network.target
 [Service]
 Type=simple
 User=$USER
-ExecStart=${LLAMA_SERVER} --model ${HOME}/models/${PROD_MODEL} --port 8080 --host 0.0.0.0 --n-gpu-layers ${GPU_LAYERS} --ctx-size ${CTX} --parallel ${PARALLEL}
+ExecStart=${LLAMA_SERVER} --model ${HOME}/models/${PROD_MODEL} --port 8080 --host 0.0.0.0 --n-gpu-layers ${GPU_LAYERS} --ctx-size ${CTX} --parallel ${PARALLEL} ${YARN_FLAGS}
 Restart=on-failure
 RestartSec=10
 

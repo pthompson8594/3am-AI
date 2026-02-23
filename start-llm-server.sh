@@ -1,8 +1,10 @@
 #!/bin/bash
 
-MODEL_PATH="${MODEL_PATH:-$HOME/models/Qwen3-32B-Q4_K_M.gguf}"
+MODEL_PATH="${MODEL_PATH:-$HOME/models/Qwen3-14B-Q4_K_M.gguf}"
 PORT="${PORT:-8080}"
-CONTEXT_SIZE="${CONTEXT_SIZE:-8192}"
+# Native context for Qwen3-14B is 32768. YaRN flags below extend it to 131072.
+# Increase to 65536 or 131072 if you have the VRAM headroom.
+CONTEXT_SIZE="${CONTEXT_SIZE:-32768}"
 # Note: Model stays loaded in memory while server runs
 # Stop the server when not needed to free VRAM
 
@@ -14,10 +16,10 @@ auto_detect_gpu_layers() {
         free_vram=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -1)
         if [ -n "$free_vram" ] && [ "$free_vram" -gt 0 ]; then
             # Reserve 2.5GB for KV cache, compute buffers, and safety margin
-            # Each layer ~280MB for Qwen3-32B Q4_K_M (use 150 for 14B)
+            # Each layer ~150MB for Qwen3-14B Q4_K_M
             local reserved=2560
             local usable_vram=$((free_vram - reserved))
-            local layers=$((usable_vram / 280))
+            local layers=$((usable_vram / 150))
             [ "$layers" -lt 0 ] && layers=0
             [ "$layers" -gt 64 ] && layers=64
             echo "$layers"
@@ -64,6 +66,7 @@ echo "  GPU Layers: $GPU_LAYERS"
 echo "  Context Size: $CONTEXT_SIZE"
 echo ""
 echo "Note: Stop server (Ctrl+C) when not in use to free VRAM"
+echo "Note: YaRN enabled — context can be extended to 131072 via CONTEXT_SIZE env var"
 echo ""
 
 llama-server \
@@ -71,5 +74,9 @@ llama-server \
     --port "$PORT" \
     --n-gpu-layers "$GPU_LAYERS" \
     --ctx-size "$CONTEXT_SIZE" \
+    --rope-scaling yarn \
+    --rope-scale 4 \
+    --yarn-orig-ctx 32768 \
+    --flash-attn \
     --threads 12 \
     --host 0.0.0.0

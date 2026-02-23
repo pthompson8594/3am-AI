@@ -1449,7 +1449,7 @@ class App {
                     { label: 'Retry', cls: '', action: `app.retryCodeExplain('${t.id}')` },
                     { label: 'Reject', cls: 'danger', action: `app.rejectTool('${t.id}', '${t.name}')` },
                     { label: 'Install', cls: 'primary', action: `app.installTool('${t.id}')` },
-                ], t.code);
+                ], t.code, t.pseudo_code || '');
             });
         }
 
@@ -1468,12 +1468,15 @@ class App {
         list.innerHTML = html || '<div class="tools-empty">No tools or proposals yet.</div>';
     }
 
-    _toolCard(tool, actions, code = '') {
+    _toolCard(tool, actions, code = '', pseudoCode = '') {
         const statusLabels = { installed: 'installed', code_ready: 'code ready', proposal: 'proposal' };
         const label = statusLabels[tool.status] || tool.status;
         const actionsHtml = actions.map(a =>
             `<button class="tool-action-btn ${a.cls}" onclick="${a.action}">${a.label}</button>`
         ).join('');
+        const pseudoHtml = pseudoCode
+            ? `<div class="tool-pseudo-code"><div class="tool-pseudo-label">What it does</div><pre class="tool-pseudo-body">${this.escapeHtml(pseudoCode)}</pre></div>`
+            : '';
         const codeHtml = code
             ? `<div class="tool-code-viewer" id="code-${tool.id}"><pre>${this.escapeHtml(code)}</pre></div>`
             : '';
@@ -1484,6 +1487,7 @@ class App {
                     <span class="tool-card-status tool-status-${tool.status}">${label}</span>
                 </div>
                 <div class="tool-card-desc">${this.escapeHtml(tool.description)}</div>
+                ${pseudoHtml}
                 ${codeHtml}
                 <div class="tool-card-actions">${actionsHtml}</div>
             </div>`;

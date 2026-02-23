@@ -664,10 +664,18 @@ Gates 1–3 are bypassed when the user manually queues a topic via `?learn`. Gat
 | Stage | Command | What Happens |
 |-------|---------|-------------|
 | 1. Propose | `?propose-tool <desc>` or UI | LLM generates tool name, description, parameters |
-| 2. Generate | `?approve-tool <id>` or UI | LLM generates Python code |
+| 2. Generate | `?approve-tool <id>` or UI | LLM generates Python code + plain-English pseudo-code |
 | 3. Install | `?install-tool <id>` or UI | Safety scan → `exec()` → registered live |
 
 Tool status lifecycle: `proposal` → `code_ready` → `installed`
+
+**Code_ready card features:**
+- **"What it does"** — plain-English pseudo-code explanation generated automatically alongside the code; always visible so users without Python knowledge can evaluate the tool before installing
+- **View Code** — toggle the raw Python source
+- **Retry** — re-generate code with corrective feedback (fetches a fresh pseudo-code preview of the current code, then regenerates both code and explanation from your feedback)
+- **Reject / Install** — discard or activate the tool
+
+Both the proposal and code stages support **looping retries**: after each regeneration the card re-renders normally with all buttons restored, so you can retry as many times as needed before installing.
 
 ---
 
@@ -934,9 +942,12 @@ Graceful migration:
 |--------|----------|-------------|
 | GET | `/api/tools` | List installed + proposals |
 | POST | `/api/tools/propose` | Stage 1: propose tool `{description}` |
-| POST | `/api/tools/{id}/generate` | Stage 2: generate code |
+| POST | `/api/tools/{id}/generate` | Stage 2: generate code + pseudo-code explanation |
 | POST | `/api/tools/{id}/install` | Stage 3: safety-check and install |
 | DELETE | `/api/tools/{id}` | Uninstall tool |
+| POST | `/api/tools/{id}/explain` | Return plain-English pseudo-code of current implementation |
+| POST | `/api/tools/{id}/retry-proposal` | Revise proposal in-place `{feedback}` |
+| POST | `/api/tools/{id}/retry-code` | Regenerate code + pseudo-code `{feedback, explanation}` |
 | POST | `/api/approve` | Approve/deny pending file operation `{approved}` |
 | GET | `/api/suggestions` | Get self-improvement suggestions |
 | POST | `/api/suggestions/{id}/approve` | Approve suggestion |

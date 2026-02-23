@@ -304,6 +304,7 @@ class ProposedTool:
     code_generated_at: Optional[float] = None
     installed_at: Optional[float] = None
     rejection_reason: str = ""
+    pseudo_code: str = ""            # Plain-English explanation of the generated code
 
     def to_dict(self) -> dict:
         return {
@@ -319,6 +320,7 @@ class ProposedTool:
             "code_generated_at": self.code_generated_at,
             "installed_at": self.installed_at,
             "rejection_reason": self.rejection_reason,
+            "pseudo_code": self.pseudo_code,
         }
 
     @classmethod
@@ -336,6 +338,7 @@ class ProposedTool:
             code_generated_at=data.get("code_generated_at"),
             installed_at=data.get("installed_at"),
             rejection_reason=data.get("rejection_reason", ""),
+            pseudo_code=data.get("pseudo_code", ""),
         )
 
 
@@ -1075,6 +1078,13 @@ class SelfImproveSystem:
         tool.code_generated_at = time.time()
         self._save()
         self.on_status(f"[SelfImprove] Code generated for: {tool.name}")
+
+        # Generate pseudo-code explanation immediately so the card shows it on first render
+        explanation = await self.explain_tool_code(tool_id, client)
+        if explanation:
+            tool.pseudo_code = explanation
+            self._save()
+
         return tool
 
     async def explain_tool_code(self, tool_id: str, client) -> Optional[str]:
@@ -1257,6 +1267,13 @@ class SelfImproveSystem:
         tool.code_generated_at = time.time()
         self._save()
         self.on_status(f"[SelfImprove] Code retried for: {tool.name}")
+
+        # Refresh pseudo-code explanation for the regenerated code
+        new_explanation = await self.explain_tool_code(tool_id, client)
+        if new_explanation:
+            tool.pseudo_code = new_explanation
+            self._save()
+
         return tool
 
     def install_tool(self, tool_id: str, registry) -> tuple[bool, str]:

@@ -1446,6 +1446,7 @@ class App {
             code_ready.forEach(t => {
                 html += this._toolCard(t, [
                     { label: 'View Code', cls: '', action: `app.toggleToolCode('${t.id}')` },
+                    { label: 'Retry', cls: '', action: `app.retryCodeExplain('${t.id}')` },
                     { label: 'Reject', cls: 'danger', action: `app.rejectTool('${t.id}', '${t.name}')` },
                     { label: 'Install', cls: 'primary', action: `app.installTool('${t.id}')` },
                 ], t.code);
@@ -1458,6 +1459,7 @@ class App {
             proposals.forEach(t => {
                 html += this._toolCard(t, [
                     { label: 'Delete', cls: 'danger', action: `app.rejectTool('${t.id}', '${t.name}')` },
+                    { label: 'Retry', cls: '', action: `app.retryProposal('${t.id}')` },
                     { label: 'Generate Code', cls: 'primary', action: `app.generateToolCode('${t.id}')` },
                 ]);
             });
@@ -1544,6 +1546,121 @@ class App {
             this.loadTools();
         } catch (e) {
             this.showServerPush(`Delete failed: ${e.message}`);
+        }
+    }
+
+    cancelRetry(toolId) {
+        const card = document.getElementById(`card-${toolId}`);
+        const panel = card && card.querySelector('.retry-panel');
+        if (panel) panel.remove();
+    }
+
+    retryProposal(toolId) {
+        const card = document.getElementById(`card-${toolId}`);
+        if (!card) return;
+        // Toggle off if already open
+        const existing = card.querySelector('.retry-panel');
+        if (existing) { existing.remove(); return; }
+
+        const panel = document.createElement('div');
+        panel.className = 'retry-panel';
+        panel.innerHTML = `
+            <textarea class="retry-feedback" placeholder="What should change? e.g., remove timezone handling, simplify parameters, rename it"></textarea>
+            <div class="retry-actions">
+                <button class="tool-action-btn" onclick="app.cancelRetry('${toolId}')">Cancel</button>
+                <button class="tool-action-btn primary" onclick="app.submitProposalRetry('${toolId}')">Regenerate Proposal</button>
+            </div>`;
+        card.appendChild(panel);
+        panel.querySelector('textarea').focus();
+    }
+
+    async submitProposalRetry(toolId) {
+        const card = document.getElementById(`card-${toolId}`);
+        if (!card) return;
+        const textarea = card.querySelector('.retry-feedback');
+        const feedback = textarea ? textarea.value.trim() : '';
+        if (!feedback) return;
+
+        const btn = card.querySelector('.retry-actions .primary');
+        if (btn) { btn.disabled = true; btn.textContent = 'Regenerating...'; }
+        try {
+            const r = await fetch(`/api/tools/${toolId}/retry-proposal`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ feedback }),
+            });
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.detail || 'Retry failed');
+            this.showServerPush(`✓ Proposal updated: ${data.name}`);
+            this.loadTools();
+        } catch (e) {
+            if (btn) { btn.disabled = false; btn.textContent = 'Regenerate Proposal'; }
+            this.showServerPush(`Proposal retry failed: ${e.message}`);
+        }
+    }
+
+    async retryCodeExplain(toolId) {
+        const card = document.getElementById(`card-${toolId}`);
+        if (!card) return;
+        // Toggle off if already open
+        const existing = card.querySelector('.retry-panel');
+        if (existing) { existing.remove(); return; }
+
+        const panel = document.createElement('div');
+        panel.className = 'retry-panel';
+        panel.innerHTML = `<div class="retry-loading">Generating pseudo-code explanation…</div>`;
+        card.appendChild(panel);
+
+        try {
+            const r = await fetch(`/api/tools/${toolId}/explain`, { method: 'POST' });
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.detail || 'Explain failed');
+
+            const explanation = data.explanation;
+            panel.innerHTML = `
+                <div class="retry-explain-label">What this code does:</div>
+                <pre class="retry-explanation">${this.escapeHtml(explanation)}</pre>
+                <textarea class="retry-feedback" placeholder="Your feedback: e.g., 'use %Y-%m-%d format by default', 'add validation for empty input'"></textarea>
+                <div class="retry-actions">
+                    <button class="tool-action-btn" onclick="app.cancelRetry('${toolId}')">Cancel</button>
+                    <button class="tool-action-btn primary" onclick="app.submitCodeRetry('${toolId}', this)">Regenerate Code</button>
+                </div>`;
+            // Store explanation on the button so submitCodeRetry can read it
+            const submitBtn = panel.querySelector('.primary');
+            submitBtn._explanation = explanation;
+            submitBtn.onclick = () => this.submitCodeRetry(toolId, explanation);
+            panel.querySelector('textarea').focus();
+        } catch (e) {
+            panel.innerHTML = `
+                <div class="retry-loading" style="color:var(--danger,#f85149)">Failed: ${this.escapeHtml(e.message)}</div>
+                <div class="retry-actions">
+                    <button class="tool-action-btn" onclick="app.cancelRetry('${toolId}')">Close</button>
+                </div>`;
+        }
+    }
+
+    async submitCodeRetry(toolId, explanation) {
+        const card = document.getElementById(`card-${toolId}`);
+        if (!card) return;
+        const textarea = card.querySelector('.retry-feedback');
+        const feedback = textarea ? textarea.value.trim() : '';
+        if (!feedback) return;
+
+        const btn = card.querySelector('.retry-actions .primary');
+        if (btn) { btn.disabled = true; btn.textContent = 'Regenerating…'; }
+        try {
+            const r = await fetch(`/api/tools/${toolId}/retry-code`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ feedback, explanation }),
+            });
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.detail || 'Retry failed');
+            this.showServerPush(`✓ Code regenerated for ${data.name}`);
+            this.loadTools();
+        } catch (e) {
+            if (btn) { btn.disabled = false; btn.textContent = 'Regenerate Code'; }
+            this.showServerPush(`Code retry failed: ${e.message}`);
         }
     }
 

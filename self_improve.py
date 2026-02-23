@@ -213,6 +213,82 @@ async def tool_example(**kwargs) -> str:
 """
 
 
+TOOL_EXPLAIN_PROMPT = """Explain the following Python async tool function in plain pseudo-code.
+
+Tool name: {name}
+Description: {description}
+
+Code:
+{code}
+
+Write a clear pseudo-code explanation covering:
+1. What parameters it accepts and validates
+2. The main logic step by step
+3. What it returns on success
+4. What it returns on error
+
+Keep it to 5-10 lines. Plain text only."""
+
+
+TOOL_RETRY_PROPOSAL_PROMPT = """You are revising a tool concept based on user feedback.
+
+Original proposal:
+  Name: {name}
+  Description: {description}
+  Parameters: {parameters_json}
+  Prompt hint: {prompt_addition}
+
+User feedback: {feedback}
+
+Revise the tool concept accordingly. Respond with JSON only:
+{{
+  "name": "<snake_case name, start with a verb>",
+  "description": "<one sentence: what this tool does and when to use it>",
+  "parameters": {{
+    "type": "object",
+    "properties": {{
+      "<param1>": {{
+        "type": "<string|integer|number|boolean>",
+        "description": "<what this parameter is>"
+      }}
+    }},
+    "required": ["<param1>"]
+  }},
+  "prompt_addition": "<one bullet line for the system prompt>"
+}}
+
+Rules: snake_case name, 2-4 words, verb-first. No subprocess/socket/threading."""
+
+
+TOOL_RETRY_CODE_PROMPT = """You are revising a Python async tool based on user feedback.
+
+Tool name: {name}
+Description: {description}
+Parameters:
+{parameters_json}
+
+Previous implementation:
+{previous_code}
+
+What the previous code does (pseudo-code):
+{explanation}
+
+User feedback: {feedback}
+
+Write the corrected implementation. Same requirements:
+- Function signature MUST be: async def tool_{name}(**kwargs) -> str:
+- Extract parameters from kwargs using kwargs.get()
+- Allowed imports: json, re, math, datetime, pathlib, collections, itertools,
+  functools, typing, os.path, urllib.parse, base64, hashlib, csv, io, textwrap,
+  string, random, httpx
+- FORBIDDEN: subprocess, socket, threading, multiprocessing, ctypes, pty, tty,
+  signal, os (bare), sys, importlib. No eval(), exec(), compile(), __import__().
+- Return "[Error: ...]" on failure
+
+Respond with JSON only:
+{{"code": "<complete Python source with \\n for newlines>"}}"""
+
+
 @dataclass
 class ProposedTool:
     """A tool the LLM has proposed to create for itself."""
@@ -999,6 +1075,188 @@ class SelfImproveSystem:
         tool.code_generated_at = time.time()
         self._save()
         self.on_status(f"[SelfImprove] Code generated for: {tool.name}")
+        return tool
+
+    async def explain_tool_code(self, tool_id: str, client) -> Optional[str]:
+        """Return a plain-text pseudo-code explanation of a code_ready tool's implementation."""
+        tool = self._find_tool(tool_id)
+        if not tool:
+            self.on_status(f"[SelfImprove] explain_tool_code: tool '{tool_id}' not found")
+            return None
+        if tool.status != "code_ready" or not tool.code:
+            self.on_status(f"[SelfImprove] explain_tool_code: tool '{tool.name}' has no code to explain")
+            return None
+
+        prompt = TOOL_EXPLAIN_PROMPT.format(
+            name=tool.name,
+            description=tool.description,
+            code=tool.code,
+        )
+        try:
+            response = await client.post(
+                f"{self.llm_url}/v1/chat/completions",
+                json={
+                    "model": self.llm_model_id,
+                    "messages": [{"role": "user", "content": prompt + " /no_think"}],
+                    "max_tokens": 400,
+                    "temperature": 0.3,
+                },
+            )
+            result = response.json()
+            choices = result.get("choices") or []
+            if not choices:
+                self.on_status(f"[SelfImprove] explain_tool_code: no choices in response")
+                return None
+            explanation = choices[0]["message"]["content"].strip()
+            return explanation
+        except Exception as e:
+            self.on_status(f"[SelfImprove] explain_tool_code error: {e}")
+            return None
+
+    async def retry_tool_proposal(self, tool_id: str, feedback: str, client) -> Optional["ProposedTool"]:
+        """Revise an existing proposal in-place based on user feedback."""
+        tool = self._find_tool(tool_id)
+        if not tool:
+            self.on_status(f"[SelfImprove] retry_tool_proposal: tool '{tool_id}' not found")
+            return None
+        if tool.status != "proposal":
+            self.on_status(f"[SelfImprove] retry_tool_proposal: tool '{tool.name}' is in state '{tool.status}'")
+            return None
+
+        prompt = TOOL_RETRY_PROPOSAL_PROMPT.format(
+            name=tool.name,
+            description=tool.description,
+            parameters_json=json.dumps(tool.parameters, indent=2),
+            prompt_addition=tool.prompt_addition,
+            feedback=feedback,
+        )
+        try:
+            response = await client.post(
+                f"{self.llm_url}/v1/chat/completions",
+                json={
+                    "model": self.llm_model_id,
+                    "messages": [{"role": "user", "content": prompt + " /no_think"}],
+                    "max_tokens": 600,
+                    "temperature": 0.3,
+                    "response_format": {"type": "json_object"},
+                },
+            )
+            result = response.json()
+            choices = result.get("choices") or []
+            if not choices:
+                self.on_status(f"[SelfImprove] retry_tool_proposal: no choices in response")
+                return None
+            data = json.loads(choices[0]["message"]["content"])
+        except Exception as e:
+            self.on_status(f"[SelfImprove] retry_tool_proposal error: {e}")
+            return None
+
+        new_name = data.get("name", "").strip().lower()
+        if not re.match(r"^[a-z][a-z0-9_]{1,39}$", new_name):
+            self.on_status(f"[SelfImprove] retry_tool_proposal: invalid name '{new_name}'")
+            return None
+
+        # Check name collision — allow matching self (same tool_id)
+        for t in self.proposed_tools:
+            if t.name == new_name and t.id != tool_id and t.status in ("proposal", "code_ready", "installed"):
+                self.on_status(f"[SelfImprove] retry_tool_proposal: name '{new_name}' already in use")
+                return None
+
+        tool.name = new_name
+        tool.description = data.get("description", tool.description)
+        tool.parameters = data.get("parameters", tool.parameters)
+        tool.prompt_addition = data.get("prompt_addition", tool.prompt_addition)
+        self._save()
+        self.on_status(f"[SelfImprove] Proposal revised: {tool.name}")
+        return tool
+
+    async def retry_tool_code(self, tool_id: str, feedback: str, explanation: str, client) -> Optional["ProposedTool"]:
+        """Regenerate code for a code_ready tool using user feedback and pseudo-code explanation."""
+        tool = self._find_tool(tool_id)
+        if not tool:
+            self.on_status(f"[SelfImprove] retry_tool_code: tool '{tool_id}' not found")
+            return None
+        if tool.status != "code_ready":
+            self.on_status(f"[SelfImprove] retry_tool_code: tool '{tool.name}' is in state '{tool.status}'")
+            return None
+
+        prompt = TOOL_RETRY_CODE_PROMPT.format(
+            name=tool.name,
+            description=tool.description,
+            parameters_json=json.dumps(tool.parameters, indent=2),
+            previous_code=tool.code,
+            explanation=explanation,
+            feedback=feedback,
+        )
+        try:
+            response = await client.post(
+                f"{self.llm_url}/v1/chat/completions",
+                json={
+                    "model": self.llm_model_id,
+                    "messages": [{"role": "user", "content": prompt + " /no_think"}],
+                    "max_tokens": 1200,
+                    "temperature": 0.2,
+                    "response_format": {"type": "json_object"},
+                },
+            )
+            result = response.json()
+            choices = result.get("choices") or []
+            if not choices:
+                self.on_status(f"[SelfImprove] retry_tool_code: no choices in response: {result.get('error', result)}")
+                return None
+            data = json.loads(choices[0]["message"]["content"])
+        except Exception as e:
+            self.on_status(f"[SelfImprove] retry_tool_code error: {e}")
+            return None
+
+        code = data.get("code", "").strip()
+        if not code:
+            self.on_status(f"[SelfImprove] retry_tool_code: empty code returned")
+            return None
+
+        # Normalise double-escaped newlines from LLM
+        if "\n" not in code and r"\n" in code:
+            code = code.replace(r"\n", "\n").replace(r"\t", "\t")
+
+        # Validate signature
+        if f"async def tool_{tool.name}(" not in code:
+            self.on_status(f"[SelfImprove] retry_tool_code: missing expected function signature")
+            return None
+
+        # Syntax check
+        try:
+            compile(code, f"tool_{tool.name}.py", "exec")
+        except SyntaxError as e:
+            self.on_status(f"[SelfImprove] retry_tool_code: syntax error: {e}")
+            return None
+
+        # AST check — function must exist with a real body
+        try:
+            import ast
+            tree = ast.parse(code)
+            fn_node = next(
+                (n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == f"tool_{tool.name}"),
+                None,
+            )
+            if fn_node is None:
+                self.on_status(f"[SelfImprove] retry_tool_code: async function not found in AST")
+                return None
+            real_stmts = [
+                s for s in fn_node.body
+                if not isinstance(s, (ast.Pass, ast.Expr))
+                or (isinstance(s, ast.Expr) and not isinstance(s.value, ast.Constant))
+            ]
+            if not real_stmts and len(fn_node.body) <= 1:
+                self.on_status(f"[SelfImprove] retry_tool_code: function body is empty")
+                return None
+        except Exception as e:
+            self.on_status(f"[SelfImprove] retry_tool_code: AST parse error: {e}")
+            return None
+
+        tool.code = code
+        tool.code_generated_at = time.time()
+        self._save()
+        self.on_status(f"[SelfImprove] Code retried for: {tool.name}")
         return tool
 
     def install_tool(self, tool_id: str, registry) -> tuple[bool, str]:

@@ -1624,6 +1624,63 @@ async def remove_tool(tool_id: str, user: User = Depends(get_current_user)):
     return {"message": message}
 
 
+class ToolRetryProposalRequest(BaseModel):
+    feedback: str
+
+
+class ToolRetryCodeRequest(BaseModel):
+    feedback: str
+    explanation: str
+
+
+@app.post("/api/tools/{tool_id}/explain")
+async def explain_tool_code(tool_id: str, user: User = Depends(get_current_user)):
+    """Return a plain-text pseudo-code explanation of a code_ready tool."""
+    core = get_user_core(user)
+    si = core.introspection.self_improve
+    tool = si._find_tool(tool_id)
+    if not tool:
+        raise HTTPException(status_code=404, detail=f"Tool '{tool_id}' not found")
+    if tool.status != "code_ready" or not tool.code:
+        raise HTTPException(status_code=409, detail=f"Tool '{tool.name}' has no code to explain (status: {tool.status})")
+    explanation = await si.explain_tool_code(tool_id, core.client)
+    if not explanation:
+        raise HTTPException(status_code=500, detail="Could not generate explanation — try again")
+    return {"explanation": explanation}
+
+
+@app.post("/api/tools/{tool_id}/retry-proposal")
+async def retry_tool_proposal(tool_id: str, request: ToolRetryProposalRequest, user: User = Depends(get_current_user)):
+    """Revise an existing proposal in-place based on user feedback."""
+    core = get_user_core(user)
+    si = core.introspection.self_improve
+    tool = si._find_tool(tool_id)
+    if not tool:
+        raise HTTPException(status_code=404, detail=f"Tool '{tool_id}' not found")
+    if tool.status != "proposal":
+        raise HTTPException(status_code=409, detail=f"Tool is in state '{tool.status}', expected 'proposal'")
+    result = await si.retry_tool_proposal(tool_id, request.feedback, core.client)
+    if not result:
+        raise HTTPException(status_code=500, detail="Could not revise proposal — try again")
+    return result.to_dict()
+
+
+@app.post("/api/tools/{tool_id}/retry-code")
+async def retry_tool_code(tool_id: str, request: ToolRetryCodeRequest, user: User = Depends(get_current_user)):
+    """Regenerate code for a code_ready tool using user feedback."""
+    core = get_user_core(user)
+    si = core.introspection.self_improve
+    tool = si._find_tool(tool_id)
+    if not tool:
+        raise HTTPException(status_code=404, detail=f"Tool '{tool_id}' not found")
+    if tool.status != "code_ready":
+        raise HTTPException(status_code=409, detail=f"Tool is in state '{tool.status}', expected 'code_ready'")
+    result = await si.retry_tool_code(tool_id, request.feedback, request.explanation, core.client)
+    if not result:
+        raise HTTPException(status_code=500, detail="Code regeneration failed — try again")
+    return result.to_dict()
+
+
 # --- Static Files & Frontend ---
 
 # Mount static files if directory exists

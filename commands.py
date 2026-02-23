@@ -9,6 +9,7 @@ Handles all ?commands that bypass the LLM:
 - ?errors - View error patterns
 - ?reflect - Trigger manual reflection (incremental)
 - ?recluster - Force full memory reclustering
+- ?analyze - Manually trigger self-improvement analysis cycle
 - ?research on/off - Toggle research mode
 - ?research - View research status
 - ?findings - View research insights
@@ -106,6 +107,7 @@ class CommandHandler:
             "errors": self._handle_errors,
             "reflect": self._handle_reflect,
             "recluster": self._handle_recluster,
+            "analyze": self._handle_analyze,
             "consolidate": self._handle_consolidate,
             "research": self._handle_research,
             "findings": self._handle_findings,
@@ -125,7 +127,7 @@ class CommandHandler:
             "remove-tool": self._handle_remove_tool,
         }
 
-        ASYNC_COMMANDS = {"reflect", "recluster", "propose-tool", "approve-tool"}
+        ASYNC_COMMANDS = {"reflect", "recluster", "analyze", "propose-tool", "approve-tool"}
 
         handler = handlers.get(cmd)
         if handler:
@@ -176,6 +178,7 @@ class CommandHandler:
 - `?errors` - View common error patterns
 - `?reflect` - Trigger introspection (incremental cluster updates)
 - `?recluster` - Force full memory reclustering
+- `?analyze` - Run self-improvement analysis now (errors, feedback, suggestions)
 
 **Memory Consolidation** (automatic cleanup)
 - `?consolidate` - View consolidation status
@@ -339,6 +342,50 @@ class CommandHandler:
         else:
             return f"Reclustering error: {result.get('reason', 'unknown')}"
     
+    async def _handle_analyze(self, args: str) -> str:
+        """Manually trigger the self-improvement analysis cycle."""
+        results = await self.introspection.run_idle_cycle()
+
+        if results.get("skipped"):
+            return "Analysis skipped — memory cycle is currently running. Try again in a moment."
+
+        if results.get("nothing_to_do"):
+            lines = [
+                "**Analysis Complete** — nothing to do.",
+                "",
+                "Make sure self-improvement is enabled (`?improve on`) to generate suggestions.",
+                "Research must also be enabled (`?research on`) to run research cycles.",
+            ]
+            return "\n".join(lines)
+
+        lines = ["**Self-Improvement Analysis Complete**", ""]
+
+        if results.get("errors_analyzed"):
+            lines.append("🔍 Error patterns analyzed")
+
+        research = results.get("research", {})
+        if research and not research.get("skipped"):
+            topics_done = research.get("topics_researched", 0)
+            insights = research.get("insights_gathered", 0)
+            if topics_done or insights:
+                lines.append(f"🔬 Research: {topics_done} topic(s) researched, {insights} insight(s) gathered")
+
+        if results.get("new_suggestion"):
+            lines.append(f"💡 New suggestion from error analysis: **{results['new_suggestion']}**")
+
+        if results.get("capability_gap"):
+            lines.append(f"💡 New suggestion from feedback: **{results['capability_gap']}**")
+
+        if results.get("self_research_suggestion"):
+            lines.append(f"💡 Self-research suggestion: **{results['self_research_suggestion']}**")
+
+        if len(lines) == 2:
+            lines.append("Cycle ran but produced no new suggestions.")
+
+        lines.append("")
+        lines.append("Use `?suggestions` to view pending suggestions.")
+        return "\n".join(lines)
+
     def _handle_consolidate(self, args: str) -> str:
         """Handle consolidation commands."""
         args = args.lower().strip()

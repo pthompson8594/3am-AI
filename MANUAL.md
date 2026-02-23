@@ -965,6 +965,7 @@ All commands start with `?`. Unknown `?` prefixes are treated as regular message
 | `?errors` | Show common tool error patterns |
 | `?reflect` | Trigger a full introspection cycle manually |
 | `?recluster` | Force full Torque Clustering rebuild |
+| `?analyze` | Run self-improvement analysis now (errors, feedback, suggestions) |
 
 ### Consolidation
 

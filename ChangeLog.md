@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.1.1
+
+### ?analyze command
+- New `?analyze` command manually triggers the hourly self-improvement analysis cycle on demand
+- Runs error pattern analysis, proactive research, capability gap detection, and self-research (if enabled)
+- Previously this cycle only ran automatically once per hour in the background idle loop
+- Reports what was found: new suggestions, research insights, and analyzed error patterns
+
+### Tool pipeline UI fixes
+- Added Reject/Delete buttons to `code_ready` and `proposal` tool cards in the tools panel
+- Generate Code button now shows `↺` on failure instead of silently reverting to idle state
+
+### Tool pipeline bug fixes
+- Fixed `remove_tool()` to handle proposals and code-ready tools, not just installed ones
+- Fixed `generate_tool_code()` crash when LLM returns a response with no `choices` key
+- Fixed syntax error ("unexpected character after line continuation character") caused by LLM double-escaping newlines in JSON code strings
+
 ## 1.1.0
 
 ### Fernet field-level encryption

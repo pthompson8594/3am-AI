@@ -123,6 +123,8 @@ Open `http://localhost:8000`, create an account, and start talking. The system s
 2. Self-improvement analysis
 3. Capability gap detection → tool proposals
 
+Use `?analyze` to trigger this cycle manually at any time.
+
 ---
 
 ## The Self-Made Tools Pipeline

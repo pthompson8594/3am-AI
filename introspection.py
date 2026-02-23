@@ -469,6 +469,7 @@ class IntrospectionLoop:
                         "theme": c.theme,
                         "priority": c.priority,
                         "message_count": len(c.message_refs),
+                        "last_update": c.last_update,
                     }
                     for c in self.memory.clusters.values()
                 ]

@@ -248,6 +248,9 @@ class UserLLMCore:
         self.introspection.experience_log = self.experience_log
         self.introspection.behavior_profile = self.behavior_profile
 
+        # Gate 4: wire experience_log into research for low-confidence signal
+        self.introspection.research.set_experience_log(self.experience_log)
+
         # Tool executor (data_dir enables per-user custom tool registry)
         self.tools = ToolExecutor(
             working_dir=str(Path.home()),

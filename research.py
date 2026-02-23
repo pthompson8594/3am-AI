@@ -141,7 +141,8 @@ class ResearchTopic:
     priority: int
     added_at: float
     researched: bool = False
-    
+    backed_off_until: float = 0.0  # Gate 3: epoch timestamp when backoff expires (0 = not backed off)
+
     def to_dict(self) -> dict:
         return {
             "name": self.name,
@@ -150,11 +151,12 @@ class ResearchTopic:
             "priority": self.priority,
             "added_at": self.added_at,
             "researched": self.researched,
+            "backed_off_until": self.backed_off_until,
         }
-    
+
     @classmethod
     def from_dict(cls, data: dict) -> "ResearchTopic":
-        return cls(**data)
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
 @dataclass
@@ -226,8 +228,19 @@ class ResearchSystem:
         self.insights: list[Insight] = []
         self.usage = DailyUsage(date=str(date.today()))
 
+        # Gate state (persisted across restarts)
+        self._last_topic_identification: float = 0.0  # Gate 2: when identify_topics() last ran
+        self._topic_cooldown_days: float = 5.0        # Gate 2: default cooldown between topic scans
+
+        # Gate 4: optional experience log for low-confidence signal (set via set_experience_log)
+        self._experience_log = None
+
         self._load()
     
+    def set_experience_log(self, log) -> None:
+        """Wire in the experience log for Gate 4 (low-confidence signal)."""
+        self._experience_log = log
+
     def _load(self):
         try:
             if not RESEARCH_FILE.exists():
@@ -247,18 +260,45 @@ class ResearchSystem:
             else:
                 self.usage = DailyUsage(date=str(date.today()))
 
+            # Restore gate state
+            self._last_topic_identification = data.get("last_topic_identification", 0.0)
+
         except Exception as e:
             self.on_status(f"[Research] Load error: {e}")
+
+    def _purge_stale_insights(self) -> int:
+        """Remove insights from memory that are old enough to have decayed.
+
+        Shared insights expire after 7 days (they're in memory already).
+        Unshared insights expire after 30 days (generous window to surface them).
+        Returns the number of insights removed.
+        """
+        now = time.time()
+        shared_cutoff   = now - 7  * 86400
+        unshared_cutoff = now - 30 * 86400
+        before = len(self.insights)
+        self.insights = [
+            i for i in self.insights
+            if (i.shared and i.researched_at >= shared_cutoff)
+            or (not i.shared and i.researched_at >= unshared_cutoff)
+        ]
+        return before - len(self.insights)
 
     def _save(self):
         try:
             DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+            # Decay old insights before persisting
+            removed = self._purge_stale_insights()
+            if removed:
+                self.on_status(f"[Research] Purged {removed} stale insight(s) from research file")
 
             data = {
                 "topics": [t.to_dict() for t in self.topics[-50:]],
                 "insights": [i.to_dict() for i in self.insights[-100:]],
                 "usage": self.usage.to_dict(),
                 "last_update": time.time(),
+                "last_topic_identification": self._last_topic_identification,
             }
 
             if self.encryptor and self.encryptor.config.enabled:
@@ -326,17 +366,74 @@ class ResearchSystem:
             self.on_status(f"[Research] LLM error: {e}")
             return None
     
-    async def identify_topics(self, memory_clusters: list[dict], client: httpx.AsyncClient) -> list[ResearchTopic]:
-        """Identify interesting topics from memory clusters."""
+    async def identify_topics(self, memory_clusters: list[dict], client: httpx.AsyncClient, force: bool = False) -> list[ResearchTopic]:
+        """Identify interesting topics from memory clusters.
+
+        Four decision gates apply (all bypass-able with force=True):
+          Gate 1 — Cluster recency: skip clusters inactive for >14 days.
+          Gate 2 — Topic cooldown: don't call the LLM more than once per N days.
+          Gate 3 — Backoff filter: skip clusters whose themes match backed-off topics.
+          Gate 4 — Experience signal: halve the cooldown when low-conf responses are negatively rated.
+        """
         if not memory_clusters:
             return []
-        
+
+        now = time.time()
+
+        if not force:
+            # Gate 2 + Gate 4: determine effective cooldown
+            effective_cooldown = self._topic_cooldown_days * 86400
+            if self._experience_log:
+                try:
+                    patterns = self._experience_log.get_feedback_patterns()
+                    if patterns.get("low_conf_negative_rate", 0) > 0.25:
+                        effective_cooldown /= 2  # Gate 4: AI struggling — allow research sooner
+                        self.on_status("[Research] Low-confidence signal: expediting topic identification")
+                except Exception:
+                    pass
+
+            elapsed = now - self._last_topic_identification
+            if elapsed < effective_cooldown:
+                days_left = (effective_cooldown - elapsed) / 86400
+                self.on_status(f"[Research] Topic cooldown active — {days_left:.1f}d until next scan")
+                return []
+
+            # Gate 1: only consider clusters active in the last 14 days
+            active_cutoff = now - 14 * 86400
+            clusters = [c for c in memory_clusters if c.get("last_update", now) >= active_cutoff]
+            if not clusters:
+                self.on_status("[Research] No recently active clusters — skipping topic identification")
+                return []
+
+            # Gate 3: filter clusters whose themes overlap with backed-off topics
+            backed_off_words = {
+                word
+                for t in self.topics
+                if t.backed_off_until > now
+                for word in t.name.lower().split()
+                if len(word) > 4
+            }
+            if backed_off_words:
+                pre_filter = len(clusters)
+                clusters = [
+                    c for c in clusters
+                    if not any(word in c.get("theme", "").lower() for word in backed_off_words)
+                ]
+                skipped = pre_filter - len(clusters)
+                if skipped:
+                    self.on_status(f"[Research] Skipped {skipped} cluster(s) in backoff")
+            if not clusters:
+                self.on_status("[Research] All active clusters currently in backoff")
+                return []
+        else:
+            clusters = memory_clusters
+
         # Filter to high-priority clusters
-        relevant = [c for c in memory_clusters if c.get("priority", 0) >= self.config.min_cluster_priority]
-        
+        relevant = [c for c in clusters if c.get("priority", 0) >= self.config.min_cluster_priority]
+
         if not relevant:
             return []
-        
+
         clusters_text = "\n".join([
             f"- {c.get('theme', 'Unknown')} (priority: {c.get('priority', 0)}, messages: {c.get('message_count', 0)})"
             for c in relevant[:10]
@@ -344,18 +441,23 @@ class ResearchSystem:
         
         prompt = TOPIC_EXTRACTION_PROMPT.format(clusters=clusters_text)
         result = await self._llm_request(prompt, client)
-        
+
+        # Record that we called the LLM regardless of outcome (cooldown applies either way)
+        if not force:
+            self._last_topic_identification = time.time()
+
         if not result or "topics" not in result:
+            self._save()
             return []
-        
+
         new_topics = []
         existing_names = {t.name.lower() for t in self.topics}
-        
+
         for topic_data in result["topics"]:
             name = topic_data.get("name", "").strip()
             if name.lower() in existing_names:
                 continue
-            
+
             topic = ResearchTopic(
                 name=name,
                 search_query=topic_data.get("search_query", name),
@@ -365,11 +467,11 @@ class ResearchSystem:
             )
             new_topics.append(topic)
             self.topics.append(topic)
-        
+
+        self._save()
         if new_topics:
-            self._save()
             self.on_status(f"[Research] Identified {len(new_topics)} new topics to research")
-        
+
         return new_topics
     
     async def research_topic(self, topic: ResearchTopic, client: httpx.AsyncClient, memory_system=None) -> list[Insight]:
@@ -441,12 +543,16 @@ class ResearchSystem:
                     on_status=self.on_status,
                 )
         
-        if search_quality == "poor":
-            self.on_status(f"[Research] Warning: Search quality was poor for '{topic.name}'")
-        
+        # Gate 3: back off this topic if results were poor or empty
+        if search_quality == "poor" or not new_insights:
+            backoff_days = 7
+            topic.backed_off_until = time.time() + backoff_days * 86400
+            reason = "poor search quality" if search_quality == "poor" else "no useful insights found"
+            self.on_status(f"[Research] Backing off '{topic.name}' for {backoff_days}d ({reason})")
+
         topic.researched = True
         self._save()
-        
+
         self.on_status(f"[Research] Found {len(new_insights)} insights about {topic.name}")
         
         return new_insights
@@ -467,19 +573,20 @@ class ResearchSystem:
             self.on_status("[Research] Daily quota exhausted, skipping")
             return results
         
-        # Identify new topics if we don't have unresearched ones
-        unresearched = [t for t in self.topics if not t.researched]
-        
+        # Identify new topics if we have none ready to research (Gate 3: exclude backed-off)
+        now = time.time()
+        unresearched = [t for t in self.topics if not t.researched and t.backed_off_until < now]
+
         if not unresearched:
             new_topics = await self.identify_topics(memory_clusters, client)
             results["topics_identified"] = len(new_topics)
             unresearched = new_topics
-        
+
         # Research the highest priority unresearched topic
         if unresearched:
             unresearched.sort(key=lambda t: t.priority, reverse=True)
             topic = unresearched[0]
-            
+
             insights = await self.research_topic(topic, client, memory_system=memory_system)
             results["topics_researched"] = 1
             results["insights_found"] = len(insights)

@@ -1007,11 +1007,12 @@ class MemorySystem:
             print(f"[Memory] Urgency check error: {e}")
             return []
 
-    async def _store_fact(self, fact: dict, user_message: str = "", assistant_response: str = ""):
+    async def _store_fact(self, fact: dict, user_message: str = "", assistant_response: str = "") -> Optional[str]:
         """
         Store a single extracted fact.
         Dedup check via sqlite-vec MATCH (single query, no full-scan loop).
         Embedding stored in vec_memories; metadata in memories table.
+        Returns the new memory ID, or None if the fact was deduped/skipped.
         """
         try:
             priority = max(1, min(5, int(fact.get("priority", 1))))
@@ -1021,7 +1022,7 @@ class MemorySystem:
         category = fact.get("category", "general")
 
         if not summary or priority < 2:
-            return
+            return None
 
         embedding = self.embedder.embed(summary)
         emb_bytes = np.array(embedding, dtype=np.float32).tobytes()
@@ -1038,7 +1039,7 @@ class MemorySystem:
 
         if row and row[1] < DEDUP_DISTANCE:
             print(f"[Memory] Skipping duplicate fact: {summary[:60]}")
-            return
+            return None
 
         current_time = time.time()
         entry_id = f"msg_{time.time_ns()}"
@@ -1087,6 +1088,7 @@ class MemorySystem:
                 self._save_cluster(best_cluster)
 
         self.stats["total_messages"] = len(self.messages)
+        return entry_id
 
     async def add_research_finding(
         self,
@@ -1111,9 +1113,10 @@ class MemorySystem:
             "priority": priority,
             "category": "research",
         }
-        await self._store_fact(fact_dict, user_message=f"[Research] {topic}", assistant_response=fact)
+        memory_id = await self._store_fact(fact_dict, user_message=f"[Research] {topic}", assistant_response=fact)
         if on_status:
             on_status(f"[Memory] Stored research finding: {fact[:60]}...")
+        return memory_id
 
     # ── Conflict resolution ───────────────────────────────────────────────────
 

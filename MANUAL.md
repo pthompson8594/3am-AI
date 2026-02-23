@@ -639,7 +639,8 @@ See [Chat Commands Reference](#chat-commands-reference) for the full list.
 - Daily quota to limit API usage (default: 5 searches/day)
 - Research findings stored in `research.json` (encrypted) and written into long-term memory
 - High-confidence findings (≥0.8) stored as priority-3 memories; others as priority-2
-- Findings expire from `research.json` after 30 days (already in memory by then)
+- Findings expire from `research.json` after 7 days (already in memory; log is just for review)
+- Manually deleting an insight from the UI also removes its corresponding memory entry
 
 **Four-layer decision gate — controls when topic scanning runs:**
 

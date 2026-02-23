@@ -1386,11 +1386,23 @@ async def delete_research_topic(idx: int, user: User = Depends(get_current_user)
 
 @app.delete("/api/research/insight/{idx}")
 async def delete_research_insight(idx: int, user: User = Depends(get_current_user)):
-    """Delete a research insight by list index."""
+    """Delete a research insight and its corresponding memory entry."""
     core = get_user_core(user)
-    if not core.introspection.research.delete_insight(idx):
+    research = core.introspection.research
+
+    # Capture memory_id before the insight is removed
+    insights = research.insights
+    if idx < 0 or idx >= len(insights):
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Insight index out of range")
+
+    memory_id = insights[idx].memory_id
+    research.delete_insight(idx)
+
+    # Cascade: remove the corresponding memory entry if one was recorded
+    if memory_id:
+        core.memory.delete_memory(memory_id)
+
     return {"message": "Deleted"}
 
 

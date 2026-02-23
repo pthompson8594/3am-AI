@@ -167,6 +167,7 @@ class Insight:
     why_interesting: str
     confidence: float
     researched_at: float
+    memory_id: str = ""  # ID of the corresponding entry in memory.db (empty if deduped/not stored)
 
     def to_dict(self) -> dict:
         return {
@@ -175,6 +176,7 @@ class Insight:
             "why_interesting": self.why_interesting,
             "confidence": self.confidence,
             "researched_at": self.researched_at,
+            "memory_id": self.memory_id,
         }
 
     @classmethod
@@ -265,13 +267,14 @@ class ResearchSystem:
             self.on_status(f"[Research] Load error: {e}")
 
     def _purge_stale_insights(self) -> int:
-        """Remove insights older than 30 days from the research file.
+        """Remove insights older than 7 days from the research file.
 
-        Facts are written into memory during research, so keeping them in
-        research.json beyond 30 days is redundant.
+        Facts are written into long-term memory during research, so research.json
+        is just a browsable log. 7 days is enough to review what was learned;
+        after that the entry is redundant.
         Returns the number of insights removed.
         """
-        cutoff = time.time() - 30 * 86400
+        cutoff = time.time() - 7 * 86400
         before = len(self.insights)
         self.insights = [i for i in self.insights if i.researched_at >= cutoff]
         return before - len(self.insights)
@@ -524,16 +527,18 @@ class ResearchSystem:
             )
             new_insights.append(insight)
             self.insights.append(insight)
-            
-            # Store finding into memory for future retrieval
+
+            # Store finding into memory and record the memory ID for cascade delete
             if memory_system:
-                await memory_system.add_research_finding(
+                mem_id = await memory_system.add_research_finding(
                     topic=topic.name,
                     fact=fact,
                     confidence=confidence,
                     http_client=client,
                     on_status=self.on_status,
                 )
+                if mem_id:
+                    insight.memory_id = mem_id
         
         # Gate 3: back off this topic if results were poor or empty
         if search_quality == "poor" or not new_insights:

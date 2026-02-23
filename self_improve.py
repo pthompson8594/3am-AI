@@ -931,7 +931,12 @@ class SelfImproveSystem:
                     "response_format": {"type": "json_object"},
                 }
             )
-            data = json.loads(response.json()["choices"][0]["message"]["content"])
+            result = response.json()
+            choices = result.get("choices") or []
+            if not choices:
+                self.on_status(f"[SelfImprove] Tool code LLM error: no choices in response: {result.get('error', result)}")
+                return None
+            data = json.loads(choices[0]["message"]["content"])
         except Exception as e:
             self.on_status(f"[SelfImprove] Tool code LLM error: {e}")
             return None
@@ -940,6 +945,13 @@ class SelfImproveSystem:
         if not code:
             self.on_status("[SelfImprove] LLM returned empty code")
             return None
+
+        # LLMs sometimes double-escape newlines in JSON strings (\n → \\n).
+        # After json.loads the code arrives as one long "line 1" with literal \n
+        # sequences, which causes Python's compile() to raise "unexpected character
+        # after line continuation character".  Normalize before validating.
+        if "\n" not in code and r"\n" in code:
+            code = code.replace(r"\n", "\n").replace(r"\t", "\t")
 
         # --- Structural + syntax validation ---
         fn_sig = f"async def tool_{tool.name}("
@@ -1042,14 +1054,16 @@ class SelfImproveSystem:
         return True, f"Tool '{tool.name}' installed and active"
 
     def remove_tool(self, tool_name: str, registry) -> tuple[bool, str]:
-        """Uninstall a custom tool from the live registry."""
+        """Remove a tool or proposal at any stage."""
         tool = next(
-            (t for t in self.proposed_tools if t.name == tool_name and t.status == "installed"),
+            (t for t in self.proposed_tools if t.name == tool_name
+             and t.status in ("installed", "code_ready", "proposal")),
             None
         )
         if not tool:
-            return False, f"No installed tool named '{tool_name}'"
-        registry.unregister(tool_name)
+            return False, f"No active tool or proposal named '{tool_name}'"
+        if tool.status == "installed":
+            registry.unregister(tool_name)
         tool.status = "rejected"
         tool.rejection_reason = "Manually removed"
         self._save()

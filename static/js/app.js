@@ -1446,6 +1446,7 @@ class App {
             code_ready.forEach(t => {
                 html += this._toolCard(t, [
                     { label: 'View Code', cls: '', action: `app.toggleToolCode('${t.id}')` },
+                    { label: 'Reject', cls: 'danger', action: `app.rejectTool('${t.id}', '${t.name}')` },
                     { label: 'Install', cls: 'primary', action: `app.installTool('${t.id}')` },
                 ], t.code);
             });
@@ -1456,6 +1457,7 @@ class App {
             html += `<div class="tools-section-heading">Proposals (${proposals.length})</div>`;
             proposals.forEach(t => {
                 html += this._toolCard(t, [
+                    { label: 'Delete', cls: 'danger', action: `app.rejectTool('${t.id}', '${t.name}')` },
                     { label: 'Generate Code', cls: 'primary', action: `app.generateToolCode('${t.id}')` },
                 ]);
             });
@@ -1499,7 +1501,7 @@ class App {
             if (!r.ok) throw new Error(data.detail || 'Failed');
             this.loadTools();
         } catch (e) {
-            if (btn) { btn.disabled = false; btn.textContent = 'Generate Code'; }
+            if (btn) { btn.disabled = false; btn.textContent = 'Generate Code ↺'; }
             this.showServerPush(`Code generation failed: ${e.message}`);
         }
     }
@@ -1529,6 +1531,19 @@ class App {
             this.loadTools();
         } catch (e) {
             this.showServerPush(`Remove failed: ${e.message}`);
+        }
+    }
+
+    async rejectTool(toolId, toolName) {
+        if (!confirm(`Reject "${toolName}"? This will delete the proposal/code.`)) return;
+        try {
+            const r = await fetch(`/api/tools/${toolId}`, { method: 'DELETE' });
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.detail || 'Delete failed');
+            this.showServerPush(`✓ ${data.message}`);
+            this.loadTools();
+        } catch (e) {
+            this.showServerPush(`Delete failed: ${e.message}`);
         }
     }
 

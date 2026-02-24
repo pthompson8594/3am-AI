@@ -44,6 +44,19 @@ DATA_DIR = Path.home() / ".local/share/3am"
 STATIC_DIR = Path(__file__).parent / "static"
 LLM_URL = os.environ.get("LLM_URL", "http://localhost:8080")
 LLM_MODEL = os.environ.get("LLM_MODEL", None)
+CONFIG_FILE = Path.home() / ".config/3am/config.json"
+
+
+def _load_server_config() -> dict:
+    """Load server config from ~/.config/3am/config.json."""
+    try:
+        if CONFIG_FILE.exists():
+            with open(CONFIG_FILE) as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"[Config] Error loading config: {e}")
+    return {}
+
 
 # Auto-detect model from llama.cpp server if not specified
 def get_llm_model() -> str:
@@ -883,10 +896,24 @@ async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
     print("[Server] Starting up...")
     scheduler.start()
-    
+
+    # Start autonomous session if configured
+    _auto_session = None
+    _server_config = _load_server_config()
+    if _server_config.get("autonomous_mode"):
+        from autonomous import AutonomousSession
+        _auto_session = AutonomousSession(
+            auth_system=auth,
+            core_factory=get_user_core,
+            config=_server_config,
+        )
+        await _auto_session.start()
+
     yield
-    
+
     print("[Server] Shutting down...")
+    if _auto_session:
+        await _auto_session.stop()
     scheduler.stop()
     for core in user_cores.values():
         await core.close()

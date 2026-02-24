@@ -659,6 +659,29 @@ class IntrospectionLoop:
                 except Exception as e:
                     self.on_status(f"[Introspection] Error in memory cycle: {e}")
 
+    async def _run_pending_processing(self):
+        """
+        Extract facts from pending conversations and store them in memory.
+        Runs hourly so memories are available within an hour rather than waiting
+        for the nightly 3 AM cycle.  Skipped if the heavy cycle is running.
+        """
+        if self._in_progress:
+            return
+        if not self.memory.pending_file.exists():
+            return
+        try:
+            if not self._client:
+                self._client = httpx.AsyncClient(timeout=60.0)
+            result = await self.memory.process_pending_conversations(self._client)
+            convs = result.get("conversations_processed", 0)
+            facts = result.get("facts_stored", 0)
+            if convs:
+                self.on_status(
+                    f"[Introspection] Hourly pending: {convs} convs → {facts} facts"
+                )
+        except Exception as e:
+            self.on_status(f"[Introspection] Hourly pending error: {e}")
+
     async def _run_lite_cluster_cycle(self):
         """
         Assign any unclustered facts to existing clusters (incremental mode).
@@ -683,6 +706,9 @@ class IntrospectionLoop:
             await asyncio.sleep(IDLE_INTERVAL_SECONDS)
             if not self._running_idle:
                 break
+
+            # Process any pending conversations into memory facts hourly
+            await self._run_pending_processing()
 
             # Lite re-cluster: assign unclustered facts every 8 hours
             if time.time() - self._last_lite_recluster > LITE_RECLUSTER_INTERVAL:

@@ -296,6 +296,44 @@ class AutonomousSession:
     # Cycle execution
     # ------------------------------------------------------------------
 
+    async def _fallback_next_question(self, response: str) -> Optional[str]:
+        """
+        If the model forgot to include a NEXT: line, make a small direct LLM
+        call to generate one from the response rather than falling back to
+        cold start.
+        """
+        try:
+            import httpx as _httpx
+            payload = {
+                "model": self._core.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": (
+                            f"You just wrote the following as part of an autonomous "
+                            f"self-directed investigation:\n\n{response[-1000:]}\n\n"
+                            "What single question should you investigate next? "
+                            "Reply with only the question, nothing else."
+                        ),
+                    }
+                ],
+                "max_tokens": 60,
+                "temperature": 0.7,
+                "stream": False,
+            }
+            resp = await self._core.client.post(
+                f"{self._core.llm_url}/v1/chat/completions",
+                json=payload,
+            )
+            data = resp.json()
+            question = data["choices"][0]["message"]["content"].strip()
+            if question:
+                print(f"[Autonomous] Fallback NEXT generated: {question[:80]}")
+                return question
+        except Exception as e:
+            print(f"[Autonomous] Fallback NEXT error: {e}")
+        return None
+
     async def _run_cycle(self):
         """Drive one full autonomous cycle through the existing chat pipeline."""
         self._cycle_count += 1
@@ -344,6 +382,10 @@ class AutonomousSession:
 
         # Extract the next question from the response
         self._next_question = self._extract_next(full_response)
+
+        # Fallback: if the model forgot to include NEXT:, ask it directly
+        if not self._next_question and full_response:
+            self._next_question = await self._fallback_next_question(full_response)
 
         next_preview = (
             self._next_question[:80] if self._next_question else "(none — will cold start next cycle)"

@@ -78,14 +78,22 @@ Alex|SWE|Portland; Prefs:Neovim,ArchLinux,terse; Stack:Python,Rust,Nix; Projects
 Respond with JSON:
 {{"profile": "<single line or 2 lines max, pack as many facts as possible>"}}"""
 
-URGENCY_CHECK_PROMPT = """Does this conversation reveal a permanent identity fact about the user — their name, profession, location, or a major life change (new job, moved city, relationship change, etc.)?
+DURABLE_FACT_PROMPT = """Extract durable facts from this single exchange. Durable means: still true tomorrow, next week, or longer.
+
+Skip entirely: system metrics (CPU%, memory%, disk usage percentage, uptime, current load), values that change minute-to-minute, tasks still in progress, real-time events.
+Include: identity, preferences, skills, tools, installed software, hardware specs, projects, opinions, completed actions, persistent facts about the environment.
+
+Priority:
+5 - Remember FOREVER (name, identity, profession, location, core system facts)
+4 - Remember for MONTHS (preferences, skills, installed tools, hardware specs)
+3 - Remember for WEEKS (ongoing projects, patterns, recurring topics)
 
 User: {user_message}
 Assistant: {assistant_response}
 
-Extract only critical permanent facts (priority 5). If nothing permanent, say not urgent.
-Respond with JSON:
-{{"urgent": false}} OR {{"urgent": true, "facts": [{{"priority": 5, "summary": "<fact>", "category": "identity"}}]}}"""
+Respond with JSON — up to 5 facts, priority 3 or higher only:
+{{"facts": [{{"priority": <3-5>, "summary": "<concise durable fact>", "category": "<identity|preferences|activities|projects|interests|other>"}}]}}
+If nothing durable was learned: {{"facts": []}}"""
 
 GROUPING_PROMPT = """Group these conversations by topic. Conversations covering the same subject should be in the same group. A group can be large if the conversations are all closely related.
 
@@ -172,6 +180,15 @@ class EmbeddingModel:
             texts, convert_to_numpy=True, normalize_embeddings=True, batch_size=8
         ).tolist()
 
+# Shared singleton — loaded once, reused across all MemorySystem instances.
+_SHARED_EMBEDDER: Optional[EmbeddingModel] = None
+
+def get_shared_embedder() -> EmbeddingModel:
+    global _SHARED_EMBEDDER
+    if _SHARED_EMBEDDER is None:
+        _SHARED_EMBEDDER = EmbeddingModel()
+    return _SHARED_EMBEDDER
+
 
 # ── Memory system ─────────────────────────────────────────────────────────────
 
@@ -204,7 +221,7 @@ class MemorySystem:
         self.pending_file = self.data_dir / "pending_conversations.jsonl"
         self.model = model
         self.llm_model_id = self._load_model_id()
-        self.embedder = EmbeddingModel()
+        self.embedder = get_shared_embedder()
 
         self.messages: dict[str, MemoryEntry] = {}
         self.clusters: dict[str, MemoryCluster] = {}
@@ -212,6 +229,13 @@ class MemorySystem:
         self._clustering_in_progress = False
         self._user_profile: Optional[str] = None
         self._profile_dirty = False
+        self._viz_cache: Optional[dict] = None       # cached UMAP/PCA result
+        self._viz_cache_key: tuple = (-1, -1)        # (memory_count, cluster_count) at last compute
+        # LRU cache for query embeddings: {query_key: (embedding, timestamp)}
+        # Avoids re-running the sentence-transformer on repeated/similar queries.
+        self._embed_cache: dict = {}
+        self._EMBED_CACHE_TTL = 60.0   # seconds
+        self._EMBED_CACHE_MAX = 32     # max entries before oldest evicted
         self.stats = {
             "total_messages": 0,
             "active_clusters": 0,
@@ -219,6 +243,9 @@ class MemorySystem:
             "last_clustering": 0,
             "last_full_recluster": 0,
         }
+
+        # Rolling dedup stats for saturation detection: list of {"extracted": N, "stored": M}
+        self._recent_exchange_stats: list = []
 
         # Per-thread DB connections (WAL allows concurrent reads from multiple threads)
         self._local = threading.local()
@@ -847,6 +874,22 @@ class MemorySystem:
 
     # ── Context retrieval ─────────────────────────────────────────────────────
 
+    def _embed_cached(self, text: str) -> list[float]:
+        """Return embedding for text, using a short-TTL LRU cache to avoid
+        redundant sentence-transformer calls on repeated queries."""
+        key = text[:200]  # truncate long queries for the cache key
+        now = time.time()
+        entry = self._embed_cache.get(key)
+        if entry and (now - entry[1]) < self._EMBED_CACHE_TTL:
+            return entry[0]
+        embedding = self.embedder.embed(text)
+        # Evict oldest entry if at capacity
+        if len(self._embed_cache) >= self._EMBED_CACHE_MAX:
+            oldest = min(self._embed_cache, key=lambda k: self._embed_cache[k][1])
+            del self._embed_cache[oldest]
+        self._embed_cache[key] = (embedding, now)
+        return embedding
+
     def get_relevant_context(self, query: str, max_clusters: int = 2) -> str:
         """
         Retrieve relevant memory context for a query.
@@ -856,7 +899,7 @@ class MemorySystem:
         if not self.clusters:
             return ""
 
-        query_embedding = self.embedder.embed(query)
+        query_embedding = self._embed_cached(query)
 
         cluster_scores = []
         for cluster in self.clusters.values():
@@ -940,8 +983,8 @@ class MemorySystem:
         on_status: Optional[Callable[[str], None]] = None,
     ):
         """
-        Fast chat-time path: append to pending queue + urgency check for priority-5 facts.
-        Full extraction deferred to sleep/introspection cycle.
+        Fast chat-time path: append to pending queue + extract durable facts immediately.
+        Full batch extraction (cross-conversation patterns) deferred to sleep/introspection cycle.
         """
         try:
             self._append_pending({
@@ -951,13 +994,22 @@ class MemorySystem:
                 "assistant": assistant_response,
             })
 
-            urgent_facts = await self._urgency_check(user_message, assistant_response, http_client)
-            if urgent_facts:
-                for fact in urgent_facts:
-                    await self._store_fact(fact, user_message, assistant_response)
-                print(f"[Memory] Stored {len(urgent_facts)} urgent facts immediately")
+            facts = await self._extract_durable_facts(user_message, assistant_response, http_client)
+            stored = 0
+            for fact in facts:
+                mem_id = await self._store_fact(fact, user_message, assistant_response)
+                if mem_id:
+                    stored += 1
+
+            # Track dedup stats for saturation detection
+            self._recent_exchange_stats.append({"extracted": len(facts), "stored": stored})
+            if len(self._recent_exchange_stats) > 10:
+                self._recent_exchange_stats = self._recent_exchange_stats[-10:]
+
+            if stored:
+                print(f"[Memory] Stored {stored} durable fact(s) immediately")
                 if on_status:
-                    on_status(f"[Memory: {len(urgent_facts)} identity fact(s) stored]")
+                    on_status(f"[Memory: {stored} fact(s) stored]")
             else:
                 if on_status:
                     on_status("[Memory: queued for sleep processing]")
@@ -966,6 +1018,21 @@ class MemorySystem:
             import traceback
             print(f"[Memory] Error in queue_conversation: {e}")
             traceback.print_exc()
+
+    def saturation_rate(self, window: int = 3) -> float:
+        """
+        Fraction of recently extracted facts that were rejected as duplicates.
+        Returns 0.0 if there is not enough data or too few facts to measure.
+        A rate near 1.0 means the topic is mined out — nothing new to learn.
+        """
+        recent = self._recent_exchange_stats[-window:]
+        if len(recent) < window:
+            return 0.0
+        total_extracted = sum(s["extracted"] for s in recent)
+        total_stored = sum(s["stored"] for s in recent)
+        if total_extracted < 3:  # too few facts to draw a conclusion
+            return 0.0
+        return 1.0 - (total_stored / total_extracted)
 
     def _append_pending(self, entry: dict):
         try:
@@ -979,13 +1046,16 @@ class MemorySystem:
         except Exception as e:
             print(f"[Memory] Pending write error: {e}")
 
-    async def _urgency_check(
+    async def _extract_durable_facts(
         self, user_message: str, assistant_response: str, http_client
     ) -> list[dict]:
-        """Quick LLM check for priority-5 identity facts. Fails safe (empty list on error)."""
-        prompt = URGENCY_CHECK_PROMPT.format(
-            user_message=user_message[:300],
-            assistant_response=assistant_response[:300],
+        """
+        Extract durable facts from a single exchange. Fails safe (empty list on error).
+        Filters out transient system metrics; returns priority 3-5 only.
+        """
+        prompt = DURABLE_FACT_PROMPT.format(
+            user_message=user_message[:500],
+            assistant_response=assistant_response[:800],
         )
         try:
             response = await http_client.post(
@@ -993,18 +1063,16 @@ class MemorySystem:
                 json={
                     "model": self.llm_model_id,
                     "messages": [{"role": "user", "content": prompt + " /no_think"}],
-                    "max_tokens": 150,
+                    "max_tokens": 220,
                     "temperature": 0.1,
                     "response_format": {"type": "json_object"},
                 },
-                timeout=20.0,
+                timeout=25.0,
             )
             parsed = json.loads(response.json()["choices"][0]["message"]["content"])
-            if parsed.get("urgent"):
-                return parsed.get("facts", [])
-            return []
+            return [f for f in parsed.get("facts", []) if int(f.get("priority", 0)) >= 3]
         except Exception as e:
-            print(f"[Memory] Urgency check error: {e}")
+            print(f"[Memory] Durable fact extraction error: {e}")
             return []
 
     async def _store_fact(self, fact: dict, user_message: str = "", assistant_response: str = "") -> Optional[str]:
@@ -1227,6 +1295,7 @@ class MemorySystem:
         groups = await self._group_conversations(one_liners, len(pending), http_client)
 
         total_facts = 0
+        extraction_failures = 0
         for group_indices in groups:
             group_convs = [pending[i] for i in group_indices if i < len(pending)]
             if not group_convs:
@@ -1236,12 +1305,19 @@ class MemorySystem:
                 for j, c in enumerate(group_convs)
             )
             facts = await self._extract_facts_from_group(conv_text, http_client)
+            if not facts:
+                extraction_failures += 1
             ref_conv = group_convs[0]
             for fact in facts:
                 await self._store_fact(fact, ref_conv["user"], ref_conv["assistant"])
                 total_facts += 1
 
-        self.pending_file.unlink()
+        # Only clear the pending file if extraction didn't completely fail
+        # (all groups failed = server was down; keep conversations for next run)
+        if extraction_failures < len(groups):
+            self.pending_file.unlink()
+        else:
+            print("[Memory] All extraction groups failed — keeping pending file for next run.")
 
         result = {
             "status": "success",
@@ -1285,31 +1361,42 @@ class MemorySystem:
         self, conv_text: str, http_client
     ) -> list[dict]:
         prompt = EXTRACTION_PROMPT.format(conversations=conv_text)
-        try:
-            response = await http_client.post(
-                f"{self.llm_url}/v1/chat/completions",
-                json={
-                    "model": self.llm_model_id,
-                    "messages": [{"role": "user", "content": prompt + " /no_think"}],
-                    "max_tokens": 500,
-                    "temperature": 0.1,
-                    "response_format": {"type": "json_object"},
-                },
-                timeout=45.0,
-            )
-            parsed = json.loads(response.json()["choices"][0]["message"]["content"])
-            facts = parsed.get("facts", [])
 
-            def safe_priority(f):
-                try:
-                    return int(f.get("priority", 1))
-                except (TypeError, ValueError):
-                    return 1
+        def safe_priority(f):
+            try:
+                return int(f.get("priority", 1))
+            except (TypeError, ValueError):
+                return 1
 
-            return [f for f in facts if safe_priority(f) >= 2][:8]
-        except Exception as e:
-            print(f"[Memory] Extraction error: {e}")
-            return []
+        last_error = None
+        for attempt in range(3):
+            try:
+                if attempt > 0:
+                    await asyncio.sleep(15 * attempt)  # 15s then 30s before retries
+                response = await http_client.post(
+                    f"{self.llm_url}/v1/chat/completions",
+                    json={
+                        "model": self.llm_model_id,
+                        "messages": [{"role": "user", "content": prompt + " /no_think"}],
+                        "max_tokens": 500,
+                        "temperature": 0.1,
+                        "response_format": {"type": "json_object"},
+                    },
+                    timeout=45.0,
+                )
+                parsed = json.loads(response.json()["choices"][0]["message"]["content"])
+                facts = parsed.get("facts", [])
+                return [f for f in facts if safe_priority(f) >= 2][:8]
+            except Exception as e:
+                last_error = e
+                err_str = str(e).lower()
+                if any(x in err_str for x in ("disconnect", "connect", "transport", "network", "reset")):
+                    print(f"[Memory] Extraction attempt {attempt + 1} failed (server busy): {e}")
+                    continue
+                break  # non-transport error — don't retry
+
+        print(f"[Memory] Extraction error: {last_error}")
+        return []
 
     # ── Torque Clustering ─────────────────────────────────────────────────────
 
@@ -1649,12 +1736,18 @@ class MemorySystem:
         """
         Return 3D-projected memory positions for the star-map visualizer.
         Uses UMAP (umap-learn) if available, falls back to PCA via numpy SVD.
+        Result is cached and only recomputed when memory or cluster count changes.
         Returns {"memories": [...], "clusters": [...]}.
         """
         from collections import defaultdict
 
         if not self.messages:
             return {"memories": [], "clusters": []}
+
+        # Return cached result if nothing has changed
+        current_key = (len(self.messages), len(self.clusters))
+        if self._viz_cache is not None and current_key == self._viz_cache_key:
+            return self._viz_cache
 
         all_ids = list(self.messages.keys())
         ids_found, embeddings = self._fetch_all_embeddings(all_ids)
@@ -1710,7 +1803,10 @@ class MemorySystem:
                 "cz": cz,
             })
 
-        return {"memories": memories_out, "clusters": clusters_out}
+        result = {"memories": memories_out, "clusters": clusters_out}
+        self._viz_cache = result
+        self._viz_cache_key = current_key
+        return result
 
     def _reduce_to_3d(self, embeddings: np.ndarray) -> np.ndarray:
         """Reduce high-dimensional embeddings to 3D coordinates.

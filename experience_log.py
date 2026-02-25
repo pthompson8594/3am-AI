@@ -110,36 +110,42 @@ class ExperienceLog:
             }
         """
         conn = self._get_conn()
-        rows = conn.execute(
-            "SELECT user_feedback, feedback_tags, response_confidence, gate_confidence FROM experience_log"
+
+        agg = conn.execute("""
+            SELECT
+                COUNT(*)                                                             AS total,
+                SUM(CASE WHEN user_feedback = 'positive' THEN 1 ELSE 0 END)        AS positive,
+                SUM(CASE WHEN user_feedback = 'negative' THEN 1 ELSE 0 END)        AS negative,
+                AVG(response_confidence)                                             AS avg_rc,
+                AVG(gate_confidence)                                                 AS avg_gc
+            FROM experience_log
+        """).fetchone()
+
+        # Tags column is JSON — must unpack in Python; fetch only rows that have tags
+        tag_rows = conn.execute(
+            "SELECT feedback_tags FROM experience_log WHERE feedback_tags IS NOT NULL"
         ).fetchall()
+
         conn.close()
 
-        total = len(rows)
-        positive = sum(1 for r in rows if r["user_feedback"] == "positive")
-        negative = sum(1 for r in rows if r["user_feedback"] == "negative")
-        rated = positive + negative
-
         by_tag: dict[str, int] = {}
-        for r in rows:
-            if r["feedback_tags"]:
-                try:
-                    for tag in json.loads(r["feedback_tags"]):
-                        by_tag[tag] = by_tag.get(tag, 0) + 1
-                except (json.JSONDecodeError, TypeError):
-                    pass
+        for r in tag_rows:
+            try:
+                for tag in json.loads(r["feedback_tags"]):
+                    by_tag[tag] = by_tag.get(tag, 0) + 1
+            except (json.JSONDecodeError, TypeError):
+                pass
 
-        rc_vals = [r["response_confidence"] for r in rows if r["response_confidence"] is not None]
-        gc_vals = [r["gate_confidence"] for r in rows if r["gate_confidence"] is not None]
-
+        positive = agg["positive"] or 0
+        negative = agg["negative"] or 0
         return {
-            "total": total,
-            "rated": rated,
+            "total": agg["total"] or 0,
+            "rated": positive + negative,
             "positive": positive,
             "negative": negative,
             "by_tag": by_tag,
-            "avg_response_confidence": round(sum(rc_vals) / len(rc_vals), 3) if rc_vals else None,
-            "avg_gate_confidence": round(sum(gc_vals) / len(gc_vals), 3) if gc_vals else None,
+            "avg_response_confidence": round(agg["avg_rc"], 3) if agg["avg_rc"] is not None else None,
+            "avg_gate_confidence": round(agg["avg_gc"], 3) if agg["avg_gc"] is not None else None,
         }
 
     def get_recent(self, limit: int = 100) -> list[dict]:
@@ -170,39 +176,53 @@ class ExperienceLog:
     def get_analytics(self) -> dict:
         """
         Comprehensive analytics for the settings panel.
-        Returns gate decision breakdown, confidence distribution,
-        feedback patterns, and top tags in one query.
+        All aggregations done in SQL; only the feedback_tags JSON column
+        still needs a small Python pass for tag counting.
         """
         conn = self._get_conn()
-        rows = conn.execute(
-            "SELECT gate_action, gate_confidence, response_confidence, "
-            "user_feedback, feedback_tags FROM experience_log"
+
+        # Totals and feedback counts
+        totals = conn.execute("""
+            SELECT
+                COUNT(*)                                                        AS total,
+                COUNT(user_feedback)                                            AS rated,
+                SUM(CASE WHEN user_feedback = 'positive' THEN 1 ELSE 0 END)   AS positive,
+                AVG(response_confidence)                                        AS avg_rc,
+                AVG(gate_confidence)                                            AS avg_gc,
+                SUM(CASE WHEN response_confidence >= 0.65 THEN 1 ELSE 0 END)  AS high_conf,
+                SUM(CASE WHEN response_confidence >= 0.40
+                          AND response_confidence < 0.65 THEN 1 ELSE 0 END)   AS mid_conf,
+                SUM(CASE WHEN response_confidence < 0.40 THEN 1 ELSE 0 END)   AS low_conf
+            FROM experience_log
+        """).fetchone()
+
+        # Gate action breakdown
+        gate_rows = conn.execute("""
+            SELECT gate_action, COUNT(*) AS n
+            FROM experience_log
+            WHERE gate_action IN ('answer','search','ask')
+            GROUP BY gate_action
+        """).fetchall()
+
+        # Tags only (need Python to unpack JSON array column)
+        tag_rows = conn.execute(
+            "SELECT feedback_tags FROM experience_log WHERE user_feedback IS NOT NULL AND feedback_tags IS NOT NULL"
         ).fetchall()
+
         conn.close()
 
-        total = len(rows)
-        rated_rows = [r for r in rows if r["user_feedback"] is not None]
-        positive = sum(1 for r in rated_rows if r["user_feedback"] == "positive")
-        negative = len(rated_rows) - positive
+        total   = totals["total"] or 0
+        rated   = totals["rated"] or 0
+        positive = totals["positive"] or 0
+        avg_rc  = round(totals["avg_rc"], 3) if totals["avg_rc"] is not None else None
+        avg_gc  = round(totals["avg_gc"], 3) if totals["avg_gc"] is not None else None
 
         gate_counts = {"answer": 0, "search": 0, "ask": 0}
-        for r in rows:
-            if r["gate_action"] in gate_counts:
-                gate_counts[r["gate_action"]] += 1
-
-        conf_vals = [r["response_confidence"] for r in rows if r["response_confidence"] is not None]
-        high   = sum(1 for v in conf_vals if v >= 0.65)
-        medium = sum(1 for v in conf_vals if 0.40 <= v < 0.65)
-        low    = sum(1 for v in conf_vals if v < 0.40)
-        avg_rc = round(sum(conf_vals) / len(conf_vals), 3) if conf_vals else None
-
-        gc_vals = [r["gate_confidence"] for r in rows if r["gate_confidence"] is not None]
-        avg_gc  = round(sum(gc_vals) / len(gc_vals), 3) if gc_vals else None
-
-        patterns = self.get_feedback_patterns()
+        for r in gate_rows:
+            gate_counts[r["gate_action"]] = r["n"]
 
         by_tag: dict[str, int] = {}
-        for r in rated_rows:
+        for r in tag_rows:
             try:
                 for tag in json.loads(r["feedback_tags"] or "[]"):
                     by_tag[tag] = by_tag.get(tag, 0) + 1
@@ -210,19 +230,21 @@ class ExperienceLog:
                 pass
         top_tags = sorted(by_tag.items(), key=lambda x: x[1], reverse=True)[:4]
 
+        patterns = self.get_feedback_patterns()
+
         return {
             "interactions": {
                 "total": total,
-                "rated": len(rated_rows),
+                "rated": rated,
                 "positive": positive,
-                "negative": negative,
+                "negative": rated - positive,
             },
             "confidence": {
                 "avg_response": avg_rc,
                 "avg_gate": avg_gc,
-                "high": high,
-                "medium": medium,
-                "low": low,
+                "high":   totals["high_conf"] or 0,
+                "medium": totals["mid_conf"]  or 0,
+                "low":    totals["low_conf"]  or 0,
             },
             "gate_decisions": gate_counts,
             "feedback_patterns": {
@@ -242,33 +264,47 @@ class ExperienceLog:
             }
         """
         conn = self._get_conn()
-        rows = conn.execute(
-            "SELECT gate_action, gate_confidence, response_confidence, user_feedback, feedback_tags FROM experience_log WHERE user_feedback IS NOT NULL"
+
+        agg = conn.execute("""
+            SELECT
+                COUNT(*)                                                               AS total,
+                SUM(CASE WHEN response_confidence < 0.4 THEN 1 ELSE 0 END)           AS low_conf_total,
+                SUM(CASE WHEN response_confidence < 0.4
+                          AND user_feedback = 'negative' THEN 1 ELSE 0 END)          AS low_conf_neg,
+                SUM(CASE WHEN gate_action = 'search' THEN 1 ELSE 0 END)              AS search_total,
+                SUM(CASE WHEN gate_action = 'search'
+                          AND user_feedback = 'positive' THEN 1 ELSE 0 END)          AS search_pos
+            FROM experience_log
+            WHERE user_feedback IS NOT NULL
+        """).fetchone()
+
+        # Hallucination tag still needs JSON unpacking
+        tag_rows = conn.execute(
+            "SELECT feedback_tags FROM experience_log WHERE user_feedback IS NOT NULL AND feedback_tags IS NOT NULL"
         ).fetchall()
+
         conn.close()
 
-        if not rows:
+        total = agg["total"] or 0
+        if total == 0:
             return {
                 "low_conf_negative_rate": 0.0,
                 "search_helped_rate": 0.5,
                 "hallucination_rate": 0.0,
             }
 
-        total = len(rows)
+        low_conf_total = agg["low_conf_total"] or 0
+        low_conf_neg   = agg["low_conf_neg"]   or 0
+        search_total   = agg["search_total"]   or 0
+        search_pos     = agg["search_pos"]     or 0
 
-        low_conf = [r for r in rows if r["response_confidence"] is not None and r["response_confidence"] < 0.4]
-        low_conf_negative = sum(1 for r in low_conf if r["user_feedback"] == "negative")
-        low_conf_negative_rate = low_conf_negative / len(low_conf) if low_conf else 0.0
-
-        search_rows = [r for r in rows if r["gate_action"] == "search"]
-        search_positive = sum(1 for r in search_rows if r["user_feedback"] == "positive")
-        search_helped_rate = search_positive / len(search_rows) if search_rows else 0.5
+        low_conf_negative_rate = low_conf_neg / low_conf_total if low_conf_total else 0.0
+        search_helped_rate     = search_pos   / search_total   if search_total   else 0.5
 
         hallucinated = 0
-        for r in rows:
+        for r in tag_rows:
             try:
-                tags = json.loads(r["feedback_tags"] or "[]")
-                if "hallucinated" in tags:
+                if "hallucinated" in json.loads(r["feedback_tags"] or "[]"):
                     hallucinated += 1
             except (json.JSONDecodeError, TypeError):
                 pass

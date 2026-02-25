@@ -203,9 +203,9 @@ detect_gpu_layers() {
 
 GPU_TYPE=$(detect_gpu_layers)
 case "$GPU_TYPE" in
-    nvidia) GPU_LAYERS=99 ; CTX=32768 ; PARALLEL=4 ;;
-    amd)    GPU_LAYERS=999; CTX=32768 ; PARALLEL=2 ;;
-    vulkan) GPU_LAYERS=999; CTX=32768 ; PARALLEL=2 ;;
+    nvidia) GPU_LAYERS=99 ; CTX=10240 ; PARALLEL=4 ;;
+    amd)    GPU_LAYERS=999; CTX=10240 ; PARALLEL=2 ;;
+    vulkan) GPU_LAYERS=999; CTX=10240 ; PARALLEL=2 ;;
     *)      GPU_LAYERS=0  ; CTX=8192  ; PARALLEL=1 ;;
 esac
 # YaRN flags allow context up to 131072 at runtime (increase CTX above if VRAM permits)

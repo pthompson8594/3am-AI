@@ -32,7 +32,7 @@ from scheduler import IntrospectionScheduler, SchedulerConfig, CheckResult
 from data_security import SecureUserData, DataEncryptor
 from tools import ToolExecutor, parse_inline_tool_calls, PendingApproval
 from commands import CommandHandler, CommandResult
-from memory import MemorySystem
+from memory import MemorySystem, get_shared_embedder
 from introspection import IntrospectionLoop
 from experience_log import ExperienceLog
 from decision_gate import DecisionGate
@@ -89,6 +89,8 @@ scheduler = IntrospectionScheduler()
 
 # Per-user LLM cores (lazy loaded)
 user_cores: dict[str, "UserLLMCore"] = {}
+_user_last_active: dict[str, float] = {}      # touched on every get_user_core call
+_USER_CORE_TTL = 3600                         # evict cores idle for 1 hour
 
 # Per-user rate limiting for /api/chat
 _user_last_message: dict[str, float] = {}
@@ -240,9 +242,10 @@ class UserLLMCore:
             encryptor=self._encryptor,
         )
         
-        # Load user settings
-        self.search_provider = self._load_search_provider()
-        mk13_settings = self._load_mk13_settings()
+        # Load user settings — read the file once, pass it to both helpers
+        _raw_settings = self._load_raw_settings()
+        self.search_provider = _raw_settings.get("search_provider", "google")
+        mk13_settings = self._parse_mk13_settings(_raw_settings)
         self.decision_gate_enabled: bool = mk13_settings.get("decision_gate_enabled", True)
         self.decision_gate_sensitivity: float = mk13_settings.get("decision_gate_sensitivity", 0.5)
         self.show_confidence: bool = mk13_settings.get("show_confidence", True)
@@ -282,18 +285,27 @@ class UserLLMCore:
         )
         
         self._load_conversations()
-    
-    def _load_search_provider(self) -> str:
-        """Load search provider from user settings."""
+        # Cache for the static (non-query-specific) parts of the system prompt.
+        # Invalidated by bumping _prompt_cache_version or on TTL expiry.
+        self._static_prompt_cache: Optional[str] = None
+        self._static_prompt_ts: float = 0.0
+        self._STATIC_PROMPT_TTL: float = 30.0   # seconds
+        self._prompt_cache_version: int = 0
+
+    def invalidate_prompt_cache(self):
+        """Call after updating behavior profile, custom prompt, or user profile."""
+        self._prompt_cache_version += 1
+
+    def _load_raw_settings(self) -> dict:
+        """Load settings.json once; returns empty dict on any error."""
         try:
             settings_file = self.user_data.base_path / "settings.json"
             if settings_file.exists():
                 with open(settings_file) as f:
-                    settings = json.load(f)
-                return settings.get("search_provider", "google")
+                    return json.load(f)
         except Exception:
             pass
-        return "google"
+        return {}
     
     def set_search_provider(self, provider: str):
         """Set and persist search provider setting."""
@@ -315,22 +327,17 @@ class UserLLMCore:
         except Exception:
             pass
     
-    def _load_mk13_settings(self) -> dict:
-        """Load MK13-specific settings from user settings.json."""
+    def _parse_mk13_settings(self, s: dict) -> dict:
+        """Extract MK13-specific keys from an already-loaded settings dict."""
         try:
-            settings_file = self.user_data.base_path / "settings.json"
-            if settings_file.exists():
-                with open(settings_file) as f:
-                    s = json.load(f)
-                return {
-                    "decision_gate_enabled": s.get("decision_gate_enabled", True),
-                    "decision_gate_sensitivity": float(s.get("decision_gate_sensitivity", 0.5)),
-                    "show_confidence": s.get("show_confidence", True),
-                    "show_feedback_buttons": s.get("show_feedback_buttons", True),
-                }
+            return {
+                "decision_gate_enabled": s.get("decision_gate_enabled", True),
+                "decision_gate_sensitivity": float(s.get("decision_gate_sensitivity", 0.5)),
+                "show_confidence": s.get("show_confidence", True),
+                "show_feedback_buttons": s.get("show_feedback_buttons", True),
+            }
         except Exception:
-            pass
-        return {}
+            return {}
 
     def _save_mk13_settings(self):
         """Persist MK13-specific settings to user settings.json."""
@@ -770,7 +777,9 @@ class UserLLMCore:
         tool_used = tool_calls[0].get("function", {}).get("name") if tool_calls else None
         if content:
             messages.append({"role": "assistant", "content": content})
-            self._save_conversation(conversation_id)
+            asyncio.create_task(asyncio.get_event_loop().run_in_executor(
+                None, self._save_conversation, conversation_id
+            ))
 
             # Store in memory (background)
             asyncio.create_task(self._store_memory(message, content))
@@ -823,30 +832,41 @@ class UserLLMCore:
         return self.memory.get_relevant_context(query) or ""
 
     def _build_system_prompt(self, query: str, memory_ctx: str = "") -> str:
-        """Build system prompt with memory context (includes research findings via memory)."""
-        prompt = SYSTEM_PROMPT_BASE
+        """Build system prompt with memory context (includes research findings via memory).
 
-        # Add custom-installed tool descriptions so LLM knows about them
-        custom_tool_lines = self.tools.custom_registry.get_prompt_additions()
-        if custom_tool_lines:
-            prompt += f"\n\nCUSTOM TOOLS (user-installed):\n{custom_tool_lines}"
+        The static portions (custom tools, learned behaviors, behavior profile, user profile)
+        are cached for _STATIC_PROMPT_TTL seconds to avoid repeated file/DB reads on every
+        message. Memory context is still fetched fresh per request.
+        """
+        now = time.time()
+        if (
+            self._static_prompt_cache is None
+            or (now - self._static_prompt_ts) > self._STATIC_PROMPT_TTL
+        ):
+            static = SYSTEM_PROMPT_BASE
 
-        # Add custom prompt from self-improvement
-        custom = self.introspection.self_improve.get_custom_prompt()
-        if custom:
-            prompt += f"\n\n[LEARNED BEHAVIORS]\n{custom}"
+            custom_tool_lines = self.tools.custom_registry.get_prompt_additions()
+            if custom_tool_lines:
+                static += f"\n\nCUSTOM TOOLS (user-installed):\n{custom_tool_lines}"
 
-        # MK13: Behavior profile fragment (verbosity, uncertainty style, etc.)
-        bp_fragment = self.behavior_profile.to_prompt_fragment()
-        if bp_fragment:
-            prompt += f"\n\n[BEHAVIOR PROFILE]\n{bp_fragment}"
+            custom = self.introspection.self_improve.get_custom_prompt()
+            if custom:
+                static += f"\n\n[LEARNED BEHAVIORS]\n{custom}"
 
-        # Add compact user profile (priority-4/5 facts, always present)
-        profile = self.memory.get_user_profile()
-        if profile:
-            prompt += f"\n\n[USER PROFILE]\n{profile}"
+            bp_fragment = self.behavior_profile.to_prompt_fragment()
+            if bp_fragment:
+                static += f"\n\n[BEHAVIOR PROFILE]\n{bp_fragment}"
 
-        # Add memory context (retrieved once before this call; passed in to avoid double-fetch)
+            profile = self.memory.get_user_profile()
+            if profile:
+                static += f"\n\n[USER PROFILE]\n{profile}"
+
+            self._static_prompt_cache = static
+            self._static_prompt_ts = now
+
+        prompt = self._static_prompt_cache
+
+        # Add memory context (per-request; retrieved once before this call)
         if not memory_ctx:
             memory_ctx = self._get_memory_context(query)
         if memory_ctx:
@@ -862,10 +882,36 @@ class UserLLMCore:
 
 
 def get_user_core(user: User) -> UserLLMCore:
-    """Get or create LLM core for a user."""
+    """Get or create LLM core for a user. Touches the activity timestamp for TTL eviction."""
     if user.id not in user_cores:
         user_cores[user.id] = UserLLMCore(user)
+    _user_last_active[user.id] = time.time()
     return user_cores[user.id]
+
+
+async def _evict_idle_user_cores():
+    """Background task: close and remove UserLLMCore instances idle for _USER_CORE_TTL seconds."""
+    while True:
+        await asyncio.sleep(600)  # check every 10 minutes
+        now = time.time()
+        to_evict = [
+            uid for uid, last in _user_last_active.items()
+            if now - last > _USER_CORE_TTL
+            and uid not in _user_ws_connections          # don't evict connected users
+            and (_user_active_requests.get(uid, 0) == 0) # don't evict mid-request
+        ]
+        for uid in to_evict:
+            core = user_cores.pop(uid, None)
+            _user_last_active.pop(uid, None)
+            _user_last_message.pop(uid, None)
+            _user_active_requests.pop(uid, None)
+            if core:
+                try:
+                    await core.close()
+                except Exception:
+                    pass
+        if to_evict:
+            print(f"[Server] Evicted {len(to_evict)} idle user core(s).")
 
 
 # --- Dependency: Get current user from session ---
@@ -909,9 +955,24 @@ async def lifespan(app: FastAPI):
         )
         await _auto_session.start()
 
+    # Background task: evict UserLLMCore instances that have been idle > 1 hour
+    _eviction_task = asyncio.create_task(_evict_idle_user_cores())
+
+    # Pre-warm the shared embedding model singleton now, while the server is
+    # idle. All MemorySystem instances (every user + autonomous) share this one
+    # model object, so it only loads once regardless of how many users connect.
+    try:
+        await asyncio.get_event_loop().run_in_executor(
+            None, get_shared_embedder().embed, "warmup"
+        )
+        print("[Server] Shared embedding model pre-warmed.")
+    except Exception as e:
+        print(f"[Server] Embedding model pre-warm failed (non-fatal): {e}")
+
     yield
 
     print("[Server] Shutting down...")
+    _eviction_task.cancel()
     if _auto_session:
         await _auto_session.stop()
     scheduler.stop()
@@ -1513,6 +1574,7 @@ async def update_settings(request: SettingsUpdate, user: User = Depends(get_curr
             "search_threshold": round(sens, 2),
             "ask_threshold": round(sens * 0.6, 2),
         })
+        core.invalidate_prompt_cache()
         mk13_changed = True
     if request.show_confidence is not None:
         core.show_confidence = request.show_confidence
@@ -1573,6 +1635,7 @@ async def update_behavior_profile(request: BehaviorProfileUpdate, user: User = D
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
     core.behavior_profile.update(updates)
+    core.invalidate_prompt_cache()
     return {"message": "Behavior profile updated", "profile": core.behavior_profile.get()}
 
 

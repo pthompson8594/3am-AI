@@ -39,12 +39,8 @@ Use DONE only when you have genuinely exhausted this topic and continuing \
 would mean repeating yourself. Otherwise use NEXT."""
 
 _COLD_START_PROMPT = """\
-You are an autonomous AI assistant running on a local machine. No user is present. \
-You have no memory yet.
-
-Your task: decide what to think about first. Generate a question worth investigating, \
-then answer it as thoroughly as you can, then decide what that answer makes you \
-curious about next.
+You are an autonomous AI assistant. No user is present. \
+Think about something you find genuinely interesting and explore it thoroughly.
 
 """ + _ENDING_INSTRUCTIONS + """
 
@@ -55,8 +51,7 @@ You are an autonomous AI assistant in an ongoing self-directed session. \
 No user is present. Your memory from previous sessions is available above.
 
 Review what you have been exploring and continue the investigation. \
-Choose the most interesting thread to develop further, explain your reasoning, \
-and work through it carefully.
+Choose the most interesting thread to develop further and work through it carefully.
 
 """ + _ENDING_INSTRUCTIONS
 
@@ -529,11 +524,26 @@ class AutonomousSession:
     # ------------------------------------------------------------------
 
     async def _loop(self):
-        """Background task: run cycles at the configured interval."""
+        """Background task: run cycles at the configured interval.
+
+        Uses a wall-clock check before each cycle so that if the event loop
+        was blocked (e.g. by CPU-heavy clustering or introspection) and multiple
+        sleep timers expired simultaneously, we don't fire a burst of cycles —
+        we just skip until the real interval has elapsed since the last run.
+        """
         # Wait for llama-server to finish loading before the first cycle
         await asyncio.sleep(60)
+        _last_cycle_wall: float = 0.0
 
         while self._running:
+            # Enforce real-time interval regardless of how long sleep actually waited
+            elapsed = time.time() - _last_cycle_wall
+            if elapsed < self._interval * 0.9 and _last_cycle_wall > 0:
+                remaining = self._interval - elapsed
+                await asyncio.sleep(max(5, remaining))
+                continue
+
+            _last_cycle_wall = time.time()
             try:
                 await self._run_cycle()
             except asyncio.CancelledError:

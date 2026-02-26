@@ -91,6 +91,7 @@ scheduler = IntrospectionScheduler()
 user_cores: dict[str, "UserLLMCore"] = {}
 _user_last_active: dict[str, float] = {}      # touched on every get_user_core call
 _USER_CORE_TTL = 3600                         # evict cores idle for 1 hour
+_protected_user_ids: set[str] = set()         # IDs never subject to TTL eviction (e.g. autonomous user)
 
 # Per-user rate limiting for /api/chat
 _user_last_message: dict[str, float] = {}
@@ -777,9 +778,9 @@ class UserLLMCore:
         tool_used = tool_calls[0].get("function", {}).get("name") if tool_calls else None
         if content:
             messages.append({"role": "assistant", "content": content})
-            asyncio.create_task(asyncio.get_event_loop().run_in_executor(
+            asyncio.get_running_loop().run_in_executor(
                 None, self._save_conversation, conversation_id
-            ))
+            )
 
             # Store in memory (background)
             asyncio.create_task(self._store_memory(message, content))
@@ -897,6 +898,7 @@ async def _evict_idle_user_cores():
         to_evict = [
             uid for uid, last in _user_last_active.items()
             if now - last > _USER_CORE_TTL
+            and uid not in _protected_user_ids           # don't evict autonomous/system users
             and uid not in _user_ws_connections          # don't evict connected users
             and (_user_active_requests.get(uid, 0) == 0) # don't evict mid-request
         ]
@@ -954,6 +956,9 @@ async def lifespan(app: FastAPI):
             config=_server_config,
         )
         await _auto_session.start()
+        # Protect the autonomous user's core from TTL eviction
+        if _auto_session._core:
+            _protected_user_ids.add(_auto_session._core.user.id)
 
     # Background task: evict UserLLMCore instances that have been idle > 1 hour
     _eviction_task = asyncio.create_task(_evict_idle_user_cores())
@@ -962,7 +967,7 @@ async def lifespan(app: FastAPI):
     # idle. All MemorySystem instances (every user + autonomous) share this one
     # model object, so it only loads once regardless of how many users connect.
     try:
-        await asyncio.get_event_loop().run_in_executor(
+        await asyncio.get_running_loop().run_in_executor(
             None, get_shared_embedder().embed, "warmup"
         )
         print("[Server] Shared embedding model pre-warmed.")

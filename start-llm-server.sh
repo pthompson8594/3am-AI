@@ -5,6 +5,10 @@ PORT="${PORT:-8080}"
 # Native context for Qwen3-14B is 32768. YaRN flags below extend it to 131072.
 # Increase to 65536 or 131072 if you have the VRAM headroom.
 CONTEXT_SIZE="${CONTEXT_SIZE:-32768}"
+# RPC workers for distributed inference (comma-separated host:port pairs).
+# Run start-rpc-worker.sh on each remote machine first, then set this.
+# Example: RPC_SERVERS="192.168.1.10:50052,192.168.1.11:50052"
+RPC_SERVERS="${RPC_SERVERS:-}"
 # Note: Model stays loaded in memory while server runs
 # Stop the server when not needed to free VRAM
 
@@ -64,11 +68,20 @@ echo "  Model: $MODEL_PATH"
 echo "  Port: $PORT"
 echo "  GPU Layers: $GPU_LAYERS"
 echo "  Context Size: $CONTEXT_SIZE"
+if [ -n "$RPC_SERVERS" ]; then
+    echo "  RPC Workers: $RPC_SERVERS"
+fi
 echo ""
 echo "Note: Stop server (Ctrl+C) when not in use to free VRAM"
 echo "Note: YaRN enabled — context can be extended to 131072 via CONTEXT_SIZE env var"
 echo ""
 
+RPC_ARGS=""
+if [ -n "$RPC_SERVERS" ]; then
+    RPC_ARGS="--rpc $RPC_SERVERS"
+fi
+
+# shellcheck disable=SC2086
 llama-server \
     --model "$MODEL_PATH" \
     --port "$PORT" \
@@ -79,4 +92,5 @@ llama-server \
     --yarn-orig-ctx 32768 \
     --flash-attn on \
     --threads 12 \
-    --host 0.0.0.0
+    --host 0.0.0.0 \
+    $RPC_ARGS

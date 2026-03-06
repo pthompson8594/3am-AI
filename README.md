@@ -100,6 +100,35 @@ Open `http://localhost:8000`, create an account, and start talking. The system s
 - Any GGUF model (tested with Qwen3-14B Q4_K_M)
 - GPU recommended (Vulkan, CUDA, or Metal) but CPU works
 
+### Distributed Inference with llama.cpp RPC
+
+To run a larger model (e.g. Qwen3-30B-A3B) split across multiple GPU machines:
+
+**On each worker machine** — install llama.cpp with RPC support and run:
+```bash
+./start-rpc-worker.sh          # listens on :50052 by default
+RPC_PORT=50053 ./start-rpc-worker.sh   # alternate port
+```
+
+**On the main machine** — start the model server pointing at your workers:
+```bash
+MODEL_PATH=~/models/Qwen3-30B-A3B-Q4_K_M.gguf \
+RPC_SERVERS="192.168.1.10:50052,192.168.1.11:50052" \
+./start-llm-server.sh
+```
+
+3am itself needs no changes — it always just talks to the local llama-server API. The RPC layer is transparent to it.
+
+**Building llama.cpp with RPC support:**
+```bash
+cmake -B build -DGGML_RPC=ON -DGGML_CUDA=ON    # NVIDIA
+cmake -B build -DGGML_RPC=ON -DGGML_HIP=ON     # AMD ROCm
+cmake -B build -DGGML_RPC=ON -DGGML_VULKAN=ON  # Vulkan
+cmake --build build --config Release -j
+```
+
+The `install.sh` script will ask about RPC workers and bake the addresses into the generated systemd service automatically.
+
 ---
 
 ## How It Works

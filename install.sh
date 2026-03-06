@@ -212,6 +212,42 @@ esac
 YARN_FLAGS="--rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 32768 --flash-attn on"
 echo -e "${GREEN}GPU type: ${GPU_TYPE} — using --n-gpu-layers ${GPU_LAYERS}${NC}"
 
+# Optional: RPC workers for distributed inference
+echo ""
+echo -e "${YELLOW}RPC distributed inference (optional):${NC}"
+echo "  Run start-rpc-worker.sh on each remote GPU machine, then enter"
+echo "  their addresses here to split large models across multiple GPUs."
+read -p "Configure RPC workers? [y/N] " -n 1 -r
+echo ""
+RPC_SERVERS=""
+RPC_FLAG=""
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    read -p "RPC worker addresses (comma-separated host:port, e.g. 192.168.1.10:50052): " RPC_SERVERS
+    if [ -n "$RPC_SERVERS" ]; then
+        RPC_FLAG="--rpc ${RPC_SERVERS}"
+        echo -e "${GREEN}RPC workers: ${RPC_SERVERS}${NC}"
+
+        # Generate a service template for worker machines (copy to each worker)
+        cat > "$SCRIPT_DIR/llama-rpc-worker.service" << EOF
+[Unit]
+Description=Llama.cpp RPC Worker
+After=network.target
+
+[Service]
+Type=simple
+User=$USER
+ExecStart=llama-rpc-server --host 0.0.0.0 --port 50052
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        echo -e "${GREEN}Worker service template saved to: ${SCRIPT_DIR}/llama-rpc-worker.service${NC}"
+        echo "  Copy this file to each worker machine and enable it there."
+    fi
+fi
+
 # Create LLM server service
 cat > "$SYSTEMD_DIR/llama-server.service" << EOF
 [Unit]
@@ -220,7 +256,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${LLAMA_SERVER} --model ${HOME}/models/${PROD_MODEL} --port 8080 --host 0.0.0.0 --n-gpu-layers ${GPU_LAYERS} --ctx-size ${CTX} --parallel ${PARALLEL} ${YARN_FLAGS}
+ExecStart=${LLAMA_SERVER} --model ${HOME}/models/${PROD_MODEL} --port 8080 --host 0.0.0.0 --n-gpu-layers ${GPU_LAYERS} --ctx-size ${CTX} --parallel ${PARALLEL} ${YARN_FLAGS} ${RPC_FLAG}
 Restart=on-failure
 RestartSec=10
 
@@ -260,7 +296,7 @@ After=network.target
 [Service]
 Type=simple
 User=$USER
-ExecStart=${LLAMA_SERVER} --model ${HOME}/models/${PROD_MODEL} --port 8080 --host 0.0.0.0 --n-gpu-layers ${GPU_LAYERS} --ctx-size ${CTX} --parallel ${PARALLEL} ${YARN_FLAGS}
+ExecStart=${LLAMA_SERVER} --model ${HOME}/models/${PROD_MODEL} --port 8080 --host 0.0.0.0 --n-gpu-layers ${GPU_LAYERS} --ctx-size ${CTX} --parallel ${PARALLEL} ${YARN_FLAGS} ${RPC_FLAG}
 Restart=on-failure
 RestartSec=10
 
@@ -297,6 +333,23 @@ echo ""
 echo "  View logs:"
 echo "    journalctl -u 3am -f"
 echo ""
+if [ -n "$RPC_SERVERS" ]; then
+    echo -e "${YELLOW}RPC distributed inference:${NC}"
+    echo ""
+    echo "  Workers configured: ${RPC_SERVERS}"
+    echo ""
+    echo "  On each worker machine:"
+    echo "    1. Install llama.cpp with RPC support (cmake -DGGML_RPC=ON ...)"
+    echo "    2. Copy llama-rpc-worker.service or run:"
+    echo "       ./start-rpc-worker.sh"
+    echo "    3. Allow port 50052 through the firewall:"
+    echo "       sudo ufw allow 50052/tcp"
+    echo ""
+    echo "  To use a different model (e.g. Qwen3-30B-A3B):"
+    echo "    MODEL_PATH=~/models/Qwen3-30B-A3B-Q4_K_M.gguf RPC_SERVERS=\"${RPC_SERVERS}\" ./start-llm-server.sh"
+    echo ""
+fi
+
 echo -e "${YELLOW}Firewall (if needed):${NC}"
 echo "    sudo ufw allow 8000/tcp   # Web UI"
 echo "    # OR"

@@ -1484,29 +1484,62 @@ class MemorySystem:
 
     async def backfill_links(self) -> int:
         """
-        One-time background job: build semantic lanes for all memories that
-        pre-date the lane system. Safe to call repeatedly — skips if any
-        lanes already exist.
+        Background job: build semantic lanes for memories that pre-date the lane system.
+
+        Uses a persistent meta flag ('lanes_backfilled') so it won't re-run after
+        completion, even if new memories have lanes before the first nightly cycle.
+        On each call, finds memories with no outgoing links (true orphans) and only
+        processes those — so a partial backfill is safely resumable.
         """
         conn = self._get_conn()
-        existing = conn.execute("SELECT COUNT(*) FROM memory_links").fetchone()[0]
-        if existing > 0:
-            print(f"[Memory] Lane backfill skipped — {existing} lanes already exist")
+
+        # Persistent completion flag — set only after all orphans are resolved.
+        if conn.execute("SELECT 1 FROM meta WHERE key='lanes_backfilled'").fetchone():
             return 0
 
-        all_ids = list(self.messages.keys())
-        if not all_ids:
+        if not self.messages:
             return 0
 
-        print(f"[Memory] Building memory lanes for {len(all_ids)} existing memories...")
-        ids, embeddings = self._fetch_all_embeddings(all_ids)
-        for mid, emb in zip(ids, embeddings):
+        # Find memories that have no outgoing link rows (haven't been linked yet).
+        orphan_rows = conn.execute("""
+            SELECT m.id FROM memories m
+            LEFT JOIN memory_links ml ON ml.source_id = m.id
+            WHERE ml.source_id IS NULL
+        """).fetchall()
+
+        orphans = [r[0] for r in orphan_rows if r[0] in self.messages]
+
+        if not orphans:
+            # All memories already have links — mark done.
+            with self._write_lock:
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES ('lanes_backfilled', '1')"
+                )
+                conn.commit()
+            return 0
+
+        before = conn.execute("SELECT COUNT(*) FROM memory_links").fetchone()[0]
+        print(f"[Memory] Building memory lanes for {len(orphans)} un-linked memories...")
+        ids, embeddings = self._fetch_all_embeddings(orphans)
+
+        for i, (mid, emb) in enumerate(zip(ids, embeddings)):
             self._build_semantic_links(mid, emb.tolist())
+            # Yield to the event loop every 10 memories to avoid blocking asyncio.
+            if i % 10 == 9:
+                await asyncio.sleep(0)
 
-        final_count = conn.execute("SELECT COUNT(*) FROM memory_links").fetchone()[0]
-        print(f"[Memory] Backfill complete: {final_count} lanes built across {len(ids)} memories")
+        after = conn.execute("SELECT COUNT(*) FROM memory_links").fetchone()[0]
+        new_lanes = after - before
+        print(f"[Memory] Backfill complete: {new_lanes} new lanes built across {len(ids)} memories")
         self._viz_cache = None  # Force viz to re-render with lanes
-        return final_count
+
+        with self._write_lock:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES ('lanes_backfilled', '1')"
+            )
+            conn.commit()
+
+        return new_lanes
 
     def resolve_conflicts(self) -> dict:
         """

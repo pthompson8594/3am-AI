@@ -142,6 +142,11 @@ class ResearchTopic:
     added_at: float
     researched: bool = False
     backed_off_until: float = 0.0  # Gate 3: epoch timestamp when backoff expires (0 = not backed off)
+    source_memory_ids: list = None  # IDs of memories that triggered this research (for causal lanes)
+
+    def __post_init__(self):
+        if self.source_memory_ids is None:
+            self.source_memory_ids = []
 
     def to_dict(self) -> dict:
         return {
@@ -152,6 +157,7 @@ class ResearchTopic:
             "added_at": self.added_at,
             "researched": self.researched,
             "backed_off_until": self.backed_off_until,
+            "source_memory_ids": self.source_memory_ids,
         }
 
     @classmethod
@@ -460,6 +466,17 @@ class ResearchSystem:
                 priority=topic_data.get("priority", 3),
                 added_at=time.time(),
             )
+
+            # Match topic back to its triggering cluster to build causal lanes later.
+            # Best-effort: if no cluster theme overlaps with the topic name/reason, skip.
+            reason_lower = topic.reason.lower()
+            name_lower = topic.name.lower()
+            for cluster in relevant:
+                theme_lower = cluster.get("theme", "").lower()
+                if theme_lower and (theme_lower in reason_lower or name_lower in theme_lower):
+                    topic.source_memory_ids = list(cluster.get("memory_refs", []))
+                    break
+
             new_topics.append(topic)
             self.topics.append(topic)
 
@@ -528,7 +545,8 @@ class ResearchSystem:
             new_insights.append(insight)
             self.insights.append(insight)
 
-            # Store finding into memory and record the memory ID for cascade delete
+            # Store finding into memory and record the memory ID for cascade delete.
+            # Pass source_memory_ids so causal lanes are built (one-way: source → research).
             if memory_system:
                 mem_id = await memory_system.add_research_finding(
                     topic=topic.name,
@@ -536,6 +554,7 @@ class ResearchSystem:
                     confidence=confidence,
                     http_client=client,
                     on_status=self.on_status,
+                    source_memory_ids=topic.source_memory_ids,
                 )
                 if mem_id:
                     insight.memory_id = mem_id

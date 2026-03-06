@@ -963,16 +963,12 @@ async def lifespan(app: FastAPI):
     # Background task: evict UserLLMCore instances that have been idle > 1 hour
     _eviction_task = asyncio.create_task(_evict_idle_user_cores())
 
-    # Pre-warm the shared embedding model singleton now, while the server is
-    # idle. All MemorySystem instances (every user + autonomous) share this one
-    # model object, so it only loads once regardless of how many users connect.
-    try:
-        await asyncio.get_running_loop().run_in_executor(
-            None, get_shared_embedder().embed, "warmup"
-        )
-        print("[Server] Shared embedding model pre-warmed.")
-    except Exception as e:
-        print(f"[Server] Embedding model pre-warm failed (non-fatal): {e}")
+    # Embedding model loads lazily on first use (first memory store/query),
+    # roughly 2-3 minutes after startup once the autonomous session's initial
+    # cycle completes. Pre-warming at startup caused OOM on memory-constrained
+    # systems (e.g. 16GB unified memory APU) because llama-server already
+    # occupies most of the RAM and the kernel OOM killer fires before any
+    # Python exception can be caught.
 
     yield
 

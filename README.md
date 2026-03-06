@@ -22,8 +22,10 @@ Cloud AI assistants are stateless. Every conversation starts from zero. They don
 
 ## Key Features
 
-### Persistent Memory with Torque Clustering
+### Persistent Memory with Torque Clustering and Memory Lanes
 Conversations are extracted into discrete facts, embedded, and organized using a physics-inspired clustering algorithm based on gravitational torque. The system automatically discovers natural topic boundaries — no manual thresholds. High-importance clusters get priority in context retrieval, so the model remembers what matters most.
+
+As memories are stored, the system builds a directed link graph between them — **memory lanes**. Semantically related memories get bidirectional lanes (similar concepts connect freely). When the research system learns something because of a user memory, a one-way causal lane is built from that user memory to the research finding — you can follow it forward, but there's no lane back. Retrieval uses Personalized PageRank through this graph: a query seeds the nearest memories, then activation spreads through their lanes to surface associated context that pure vector search would miss.
 
 ### Encryption at Rest
 All sensitive user data is encrypted using Fernet (AES-128-CBC + HMAC-SHA256). The key is derived from your login password via PBKDF2HMAC-SHA256 and lives only in memory — never written to disk, cleared on logout or server restart. Every field the model extracts about you (summaries, conversation excerpts, cluster themes, behavior profile, research notes, installed tools) is stored encrypted. Embedding vectors remain plaintext because they are required for vector similarity search and are not human-readable. Existing unencrypted data migrates transparently on re-write.
@@ -44,7 +46,7 @@ Every response is logged with its confidence score, gate decision, and your feed
 The system autonomously researches topics you've discussed, bringing back current information during idle hours. A four-layer decision gate prevents over-research: only clusters with recent activity are considered, topic generation is rate-limited to once every 5 days, topics that yield poor results are backed off for a week, and the cooldown shortens automatically when the AI has been giving low-confidence answers. Research findings are written into long-term memory and expire from the research file after 30 days. Results are browsable and deletable through the UI.
 
 ### 3D Memory Visualization
-A live star-map shows your memory space — clusters as suns, individual memories as orbiting planets. Useful for spotting cluster health, interesting for understanding how your AI organizes what it knows about you.
+A live star-map shows your memory space — clusters as suns, individual memories as orbiting planets. Memory lanes are rendered as edges between planets: solid lines for semantic connections, dashed directional lines for causal lanes pointing toward research findings. Useful for spotting cluster health and understanding how your AI connects what it knows about you.
 
 ---
 
@@ -64,6 +66,7 @@ Browser (Vanilla JS)          FastAPI Server              Local LLM
                         │ SQLite + sqlite-vec  │
                         │ memory.db per user   │
                         │ Torque Clustering    │
+                        │ Memory Lanes     │
                         │ Experience log       │
                         │ Behavior profile     │
                         └──────────────────────┘
@@ -103,11 +106,11 @@ Open `http://localhost:8000`, create an account, and start talking. The system s
 
 **During conversation:**
 1. Your message arrives
-2. Relevant memory clusters are retrieved via sqlite-vec similarity search
+2. Memory retrieval: vec search finds the 5 nearest memories, Personalized PageRank spreads through the lane graph to surface associated context
 3. Decision Gate evaluates: answer / search / ask for clarification
 4. Response is generated with confidence scoring (logprobs)
 5. Conversation is queued for overnight processing
-6. Priority-5 facts (identity info) are stored immediately
+6. Priority-5 facts (identity info) are stored immediately, with semantic lanes built to related memories
 
 **At 3 AM:**
 1. Pending conversations are grouped by topic
@@ -115,8 +118,9 @@ Open `http://localhost:8000`, create an account, and start talking. The system s
 3. Per-fact embeddings are generated from summaries, not raw conversation
 4. Conflicting facts are resolved (newer wins, cosine similarity ≥ 0.75)
 5. Torque Clustering rebuilds the memory map
-6. Behavior profile updates from the day's feedback patterns
-7. Compact user profile is regenerated
+6. Memory lanes are backfilled for any memories that pre-date the lane system (one-time, skipped after first run)
+7. Behavior profile updates from the day's feedback patterns
+8. Compact user profile is regenerated
 
 **Every hour (when idle):**
 1. Proactive research on approved topics
@@ -170,7 +174,7 @@ Everything stays on your machine. Per-user data in `~/.local/share/3am/users/{us
 
 | File | What it holds |
 |------|---------------|
-| `memory.db` | Memories, clusters, embeddings (sqlite-vec), experience log |
+| `memory.db` | Memories, clusters, embeddings (sqlite-vec), memory lanes, experience log |
 | `behavior_profile.json` | Learned behavioral preferences |
 | `conversations/` | Full chat history |
 | `research.json` | Research topics and findings |
@@ -207,6 +211,8 @@ Swap models by changing the server URL. The system auto-detects whatever `/v1/mo
 The answer is: for one user's daily needs, mostly yes. The model weights are fixed at 14B parameters, but the effective intelligence of the *system* grows continuously through accumulated memory, learned behavior, self-created tools, and proactive research. Context is a multiplier on capability.
 
 The memory system uses Torque Clustering, a physics-inspired algorithm that treats memories as particles with mass and discovers natural cluster boundaries through gravitational torque balance. Based on: Yang & Lin, "Autonomous clustering by fast find of mass and distance peaks," IEEE TPAMI, 2025.
+
+Memory retrieval uses Personalized PageRank through a directed link graph inspired by HippoRAG 2 (Gutierrez et al., "From RAG to Memory: Non-Parametric Continual Learning for LLMs," ICML 2025) and the Zettelkasten-style linking of A-MEM (Xu et al., NeurIPS 2025). The one-way causal lane concept is original to this project.
 
 ---
 

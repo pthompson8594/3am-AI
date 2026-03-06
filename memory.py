@@ -57,6 +57,12 @@ DECAY_RATES = {
     1: 0.1,
 }
 
+# ── Memory lane constants ─────────────────────────────────────────────────
+LANE_MIN_SIM  = 0.55   # below this = unrelated, no semantic lane
+LANE_MAX_SIM  = 0.92   # above this = duplicate (already deduped before here)
+LANE_MAX_K    = 8      # max neighbors to check per new memory
+CAUSAL_WEIGHT = 0.7    # fixed weight for one-way causal lanes
+
 # ── Prompts ──────────────────────────────────────────────────────────────────
 
 CLUSTER_THEME_PROMPT = """These memories about a user are clustered together. Generate a short theme (2-5 words) that captures what they have in common.
@@ -231,6 +237,7 @@ class MemorySystem:
         self._profile_dirty = False
         self._viz_cache: Optional[dict] = None       # cached UMAP/PCA result
         self._viz_cache_key: tuple = (-1, -1)        # (memory_count, cluster_count) at last compute
+        self._lanes_ready: Optional[bool] = None     # None = unknown, True/False cached after first check
         # LRU cache for query embeddings: {query_key: (embedding, timestamp)}
         # Avoids re-running the sentence-transformer on repeated/similar queries.
         self._embed_cache: dict = {}
@@ -348,6 +355,21 @@ class MemorySystem:
                 memory_id TEXT,
                 embedding float[768] distance_metric=cosine
             )
+        """)
+
+        # Memory lanes — directed graph of memory relationships
+        # link_type: 'semantic' (bidirectional) or 'causal' (one-way: source→research)
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS memory_links (
+                source_id  TEXT NOT NULL,
+                target_id  TEXT NOT NULL,
+                weight     REAL NOT NULL DEFAULT 1.0,
+                link_type  TEXT NOT NULL DEFAULT 'semantic',
+                created_at REAL NOT NULL,
+                PRIMARY KEY (source_id, target_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_links_source ON memory_links(source_id);
+            CREATE INDEX IF NOT EXISTS idx_links_target ON memory_links(target_id);
         """)
         conn.commit()
 
@@ -543,7 +565,88 @@ class MemorySystem:
             conn = self._get_conn()
             conn.execute("DELETE FROM memories WHERE id=?", (memory_id,))
             conn.execute("DELETE FROM vec_memories WHERE memory_id=?", (memory_id,))
+            conn.execute(
+                "DELETE FROM memory_links WHERE source_id=? OR target_id=?",
+                (memory_id, memory_id),
+            )
             conn.commit()
+
+    # ── Memory lane building ───────────────────────────────────────────────
+
+    def _build_semantic_links(self, new_id: str, embedding: list[float]) -> int:
+        """
+        Find the K nearest neighbors of a new memory and create bidirectional
+        semantic lanes to each neighbor within the [LANE_MIN_SIM, LANE_MAX_SIM) range.
+        Returns the number of lanes created (not rows — each lane = 2 rows).
+        """
+        emb_bytes = np.array(embedding, dtype=np.float32).tobytes()
+        conn = self._get_conn()
+
+        rows = conn.execute("""
+            SELECT memory_id, distance FROM vec_memories
+            WHERE embedding MATCH ?
+            AND memory_id != ?
+            ORDER BY distance
+            LIMIT ?
+        """, (emb_bytes, new_id, LANE_MAX_K + 2)).fetchall()
+
+        links = []
+        now = time.time()
+        for row in rows:
+            sim = 1.0 - row["distance"]
+            if LANE_MIN_SIM <= sim < LANE_MAX_SIM:
+                # Bidirectional — store both directions as separate rows
+                links.append((new_id,       row["memory_id"], sim, "semantic", now))
+                links.append((row["memory_id"], new_id,       sim, "semantic", now))
+
+        if links:
+            with self._write_lock:
+                conn.executemany("""
+                    INSERT OR REPLACE INTO memory_links
+                    (source_id, target_id, weight, link_type, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                """, links)
+                conn.commit()
+            self._lanes_ready = True
+
+        return len(links) // 2
+
+    def _build_causal_links(
+        self, research_memory_id: str, source_memory_ids: list[str]
+    ) -> int:
+        """
+        Build one-way causal lanes from source memories to a research finding.
+
+        These are INCOMPLETE trade lanes: you can fly FROM the source memory TO
+        the research finding, but there is no lane back. The research finding
+        exists BECAUSE of the source, not the other way around.
+
+        In PPR: A[research_idx][source_idx] is set; A[source_idx][research_idx] is not.
+        This directional asymmetry is correct by construction — only source→research
+        rows are inserted.
+        """
+        valid_sources = [
+            sid for sid in source_memory_ids if sid in self.messages
+        ]
+        if not valid_sources or research_memory_id not in self.messages:
+            return 0
+
+        now = time.time()
+        links = [
+            (sid, research_memory_id, CAUSAL_WEIGHT, "causal", now)
+            for sid in valid_sources
+        ]
+
+        with self._write_lock:
+            conn = self._get_conn()
+            conn.executemany("""
+                INSERT OR REPLACE INTO memory_links
+                (source_id, target_id, weight, link_type, created_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, links)
+            conn.commit()
+
+        return len(links)
 
     def _save_profile(self, profile: str):
         """Persist the compact user profile to meta table."""
@@ -892,14 +995,195 @@ class MemorySystem:
 
     def get_relevant_context(self, query: str, max_clusters: int = 2) -> str:
         """
-        Retrieve relevant memory context for a query.
-        Scores clusters by cosine similarity of query to cluster centroid (in RAM).
-        No DB read needed for the scoring step — cluster center_vectors are cached.
+        Retrieve relevant memory context using vector seeds + PPR lane traversal.
+
+        Step 1: Embed query, find top-5 seed memories via vec MATCH (direct similarity).
+        Step 2: Run PPR through the lane graph from those seeds — surfaces memories
+                associated with the seeds even if not directly similar to the query.
+        Step 3: Format results grouped by cluster theme.
+
+        Falls back to legacy cluster-centroid scoring if no lanes exist yet
+        (before the first backfill runs or on a fresh install).
         """
-        if not self.clusters:
+        if not self.messages:
             return ""
 
         query_embedding = self._embed_cached(query)
+        emb_bytes = np.array(query_embedding, dtype=np.float32).tobytes()
+        conn = self._get_conn()
+
+        # Step 1: seed memories via direct vector similarity
+        seed_rows = conn.execute("""
+            SELECT memory_id, distance FROM vec_memories
+            WHERE embedding MATCH ?
+            ORDER BY distance
+            LIMIT 5
+        """, (emb_bytes,)).fetchall()
+
+        seed_ids = [
+            r["memory_id"] for r in seed_rows
+            if r["memory_id"] in self.messages
+        ]
+
+        if not seed_ids:
+            return self._legacy_cluster_context(query_embedding, max_clusters)
+
+        # Step 2: check for lanes — fall back gracefully if none exist yet.
+        # Cache the result so we don't hit the DB on every retrieval call.
+        if self._lanes_ready is None:
+            self._lanes_ready = conn.execute(
+                "SELECT COUNT(*) FROM memory_links LIMIT 1"
+            ).fetchone()[0] > 0
+
+        if self._lanes_ready:
+            ranked = self._ppr_expand(seed_ids)
+        else:
+            ranked = [(sid, 1.0) for sid in seed_ids]
+
+        if not ranked:
+            return self._legacy_cluster_context(query_embedding, max_clusters)
+
+        # Step 3: format grouped by cluster
+        context_parts = ["[MEMORY CONTEXT - Things you know about this user:]"]
+        seen_themes: set[str] = set()
+
+        for memory_id, _score in ranked:
+            entry = self.messages.get(memory_id)
+            if not entry:
+                continue
+            cluster = self.clusters.get(entry.cluster_id or "") if entry.cluster_id else None
+            theme = cluster.theme if cluster else entry.category.title()
+
+            if theme not in seen_themes:
+                context_parts.append(f"\n## {theme}")
+                seen_themes.add(theme)
+
+            prefix = "[Research] " if entry.category == "research" else ""
+            context_parts.append(f"- {prefix}{entry.summary}")
+
+        if len(context_parts) <= 1:
+            return self._legacy_cluster_context(query_embedding, max_clusters)
+
+        context_parts.append("\n[Use this context naturally in your responses when relevant.]")
+        return "\n".join(context_parts)
+
+    def _ppr_expand(
+        self,
+        seed_ids: list[str],
+        damping: float = 0.85,
+        iterations: int = 15,
+        top_k: int = 10,
+    ) -> list[tuple[str, float]]:
+        """
+        Personalized PageRank through the lane graph from seed memories.
+
+        Semantic lanes are bidirectional — both directions stored in memory_links,
+        so activation flows freely either way.
+        Causal lanes are one-way — only source→research rows exist, so activation
+        flows from user memories toward research findings but not back via the lane.
+        This asymmetry is load-bearing: it models the Freelancer incomplete trade
+        lane. You can fly source→research, but to return you fly under your own power.
+
+        Returns list of (memory_id, score) sorted by score descending.
+        """
+        if not seed_ids:
+            return []
+
+        conn = self._get_conn()
+        placeholders = ",".join("?" * len(seed_ids))
+
+        # Step 1: get 1-hop neighborhood of seeds.
+        # Semantic links store both A→B and B→A, so querying either side captures
+        # the full undirected neighborhood. Causal links only store source→research,
+        # so only the forward direction appears — the one-way lane is preserved.
+        hop1_rows = conn.execute(f"""
+            SELECT DISTINCT target_id FROM memory_links WHERE source_id IN ({placeholders})
+            UNION
+            SELECT DISTINCT source_id FROM memory_links WHERE target_id IN ({placeholders})
+        """, seed_ids + seed_ids).fetchall()
+
+        neighborhood = set(seed_ids)
+        for r in hop1_rows:
+            if r[0] in self.messages:
+                neighborhood.add(r[0])
+
+        nb_list = list(neighborhood)
+        nb_placeholders = ",".join("?" * len(nb_list))
+
+        # Step 2: fetch all outgoing edges within the neighborhood.
+        # For semantic links both directions are present so PPR flows freely.
+        # For causal links only source→research is present — activation flows
+        # from the user memory toward the research finding, not back.
+        rows = conn.execute(f"""
+            SELECT source_id, target_id, weight FROM memory_links
+            WHERE source_id IN ({nb_placeholders})
+        """, nb_list).fetchall()
+
+        if not rows:
+            return [(sid, 1.0) for sid in seed_ids if sid in self.messages]
+
+        # Build adjacency list — only include still-alive memories
+        nodes_set: set[str] = set(seed_ids)
+        adj: dict[str, list[tuple[str, float]]] = {}
+
+        for source, target, weight in rows:
+            if source in self.messages and target in self.messages:
+                nodes_set.add(source)
+                nodes_set.add(target)
+                adj.setdefault(source, []).append((target, weight))
+
+        if len(nodes_set) < 2:
+            return [(sid, 1.0) for sid in seed_ids if sid in self.messages]
+
+        node_list = list(nodes_set)
+        idx = {n: i for i, n in enumerate(node_list)}
+        n = len(node_list)
+
+        # Column-stochastic transition matrix A[to][from]
+        # Semantic links: both directions stored → A[b][a] and A[a][b] both set
+        # Causal links: only source→research stored → A[research][source] set,
+        #               A[source][research] = 0 (the one-way lane — correct by design)
+        A = np.zeros((n, n))
+        for source, neighbors in adj.items():
+            si = idx[source]
+            total = sum(w for _, w in neighbors)
+            if total == 0:
+                continue
+            for target, w in neighbors:
+                ti = idx.get(target)
+                if ti is not None:
+                    A[ti][si] = w / total
+
+        # Personalization vector: uniform over seeds
+        p = np.zeros(n)
+        valid_seeds = [s for s in seed_ids if s in idx]
+        if not valid_seeds:
+            return []
+        for sid in valid_seeds:
+            p[idx[sid]] = 1.0 / len(valid_seeds)
+
+        # Power iteration: r = (1 - d)*p + d*A*r
+        r = p.copy()
+        for _ in range(iterations):
+            r = (1.0 - damping) * p + damping * (A @ r)
+
+        results = [
+            (node_list[i], float(r[i]))
+            for i in range(n)
+            if node_list[i] in self.messages and r[i] > 0
+        ]
+        results.sort(key=lambda x: -x[1])
+        return results[:top_k]
+
+    def _legacy_cluster_context(
+        self, query_embedding: list[float], max_clusters: int = 2
+    ) -> str:
+        """
+        Original cluster-centroid retrieval — used as fallback before lanes exist.
+        Scores clusters by cosine similarity of query to centroid (all in RAM).
+        """
+        if not self.clusters:
+            return ""
 
         cluster_scores = []
         for cluster in self.clusters.values():
@@ -907,16 +1191,16 @@ class MemorySystem:
             mass_weight = 1.0 + (cluster.torque_mass / 100.0) * 0.2
             weighted_score = similarity * mass_weight
             if similarity > 0.4:
-                cluster_scores.append((cluster, weighted_score, similarity))
+                cluster_scores.append((cluster, weighted_score))
 
-        cluster_scores.sort(key=lambda x: x[1], reverse=True)
+        cluster_scores.sort(key=lambda x: -x[1])
         top_clusters = cluster_scores[:max_clusters]
 
         if not top_clusters:
             return ""
 
         context_parts = ["[MEMORY CONTEXT - Things you know about this user:]"]
-        for cluster, _, _ in top_clusters:
+        for cluster, _ in top_clusters:
             valid_refs = [r for r in cluster.message_refs if r in self.messages]
             if not valid_refs:
                 continue
@@ -1125,6 +1409,7 @@ class MemorySystem:
         )
         self.messages[entry_id] = entry
         self._save_memory(entry, embedding)
+        self._build_semantic_links(entry_id, embedding)
 
         self._clustering_dirty = True
         if priority >= 4:
@@ -1165,6 +1450,7 @@ class MemorySystem:
         confidence: float,
         http_client=None,
         on_status=None,
+        source_memory_ids: list[str] = None,
     ):
         """
         Store a research finding into the memory system.
@@ -1173,8 +1459,12 @@ class MemorySystem:
         so they don't outweigh things the user told us directly (priority 4-5).
         They're tagged category="research" so they're distinguishable.
         Dedup is handled by _store_fact via vector similarity.
+
+        source_memory_ids: IDs of the user memories that triggered this research.
+        One-way causal lanes are built from each source to this finding — the
+        Freelancer incomplete trade lane. You can fly source→research via the lane,
+        but to return you fly under your own power (semantic links only).
         """
-        # Map confidence to priority: high-confidence research = 3, rest = 2
         priority = 3 if confidence >= 0.8 else 2
         fact_dict = {
             "summary": fact,
@@ -1182,11 +1472,41 @@ class MemorySystem:
             "category": "research",
         }
         memory_id = await self._store_fact(fact_dict, user_message=f"[Research] {topic}", assistant_response=fact)
+        if memory_id and source_memory_ids:
+            lane_count = self._build_causal_links(memory_id, source_memory_ids)
+            if lane_count:
+                print(f"[Memory] Built {lane_count} causal lane(s) to research finding")
         if on_status:
             on_status(f"[Memory] Stored research finding: {fact[:60]}...")
         return memory_id
 
     # ── Conflict resolution ───────────────────────────────────────────────────
+
+    async def backfill_links(self) -> int:
+        """
+        One-time background job: build semantic lanes for all memories that
+        pre-date the lane system. Safe to call repeatedly — skips if any
+        lanes already exist.
+        """
+        conn = self._get_conn()
+        existing = conn.execute("SELECT COUNT(*) FROM memory_links").fetchone()[0]
+        if existing > 0:
+            print(f"[Memory] Lane backfill skipped — {existing} lanes already exist")
+            return 0
+
+        all_ids = list(self.messages.keys())
+        if not all_ids:
+            return 0
+
+        print(f"[Memory] Building memory lanes for {len(all_ids)} existing memories...")
+        ids, embeddings = self._fetch_all_embeddings(all_ids)
+        for mid, emb in zip(ids, embeddings):
+            self._build_semantic_links(mid, emb.tolist())
+
+        final_count = conn.execute("SELECT COUNT(*) FROM memory_links").fetchone()[0]
+        print(f"[Memory] Backfill complete: {final_count} lanes built across {len(ids)} memories")
+        self._viz_cache = None  # Force viz to re-render with lanes
+        return final_count
 
     def resolve_conflicts(self) -> dict:
         """
@@ -1803,7 +2123,31 @@ class MemorySystem:
                 "cz": cz,
             })
 
-        result = {"memories": memories_out, "clusters": clusters_out}
+        # Fetch the strongest lanes for rendering.
+        # Only include lanes where both endpoints have projected positions.
+        # Cap at 200 to keep the payload manageable.
+        memory_id_set = {m["id"] for m in memories_out}
+        conn = self._get_conn()
+        lane_rows = conn.execute("""
+            SELECT source_id, target_id, weight, link_type
+            FROM memory_links
+            WHERE weight > 0.60
+            ORDER BY weight DESC
+            LIMIT 200
+        """).fetchall()
+
+        lanes_out = [
+            {
+                "source": r["source_id"],
+                "target": r["target_id"],
+                "weight": float(r["weight"]),
+                "type": r["link_type"],
+            }
+            for r in lane_rows
+            if r["source_id"] in memory_id_set and r["target_id"] in memory_id_set
+        ]
+
+        result = {"memories": memories_out, "clusters": clusters_out, "lanes": lanes_out}
         self._viz_cache = result
         self._viz_cache_key = current_key
         return result

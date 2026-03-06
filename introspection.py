@@ -470,6 +470,7 @@ class IntrospectionLoop:
                         "priority": c.priority,
                         "message_count": len(c.message_refs),
                         "last_update": c.last_update,
+                        "memory_refs": list(c.message_refs[:10]),
                     }
                     for c in self.memory.clusters.values()
                 ]
@@ -597,6 +598,16 @@ class IntrospectionLoop:
             self.on_status(f"[Introspection] Torque clustering error: {e}")
             results["torque_clustering"] = {"status": "error", "reason": str(e)}
         
+        # Backfill memory lanes for memories that pre-date the lane system.
+        # Runs once (backfill_links skips itself after first run).
+        try:
+            backfill_count = await self.memory.backfill_links()
+            if backfill_count:
+                self.on_status(f"[Introspection] Built {backfill_count} memory lanes (backfill)")
+                results["lanes_backfilled"] = backfill_count
+        except Exception as e:
+            self.on_status(f"[Introspection] Lane backfill error: {e}")
+
         # Regenerate compact user profile if priority-4/5 memories changed
         if self.memory.is_profile_dirty():
             self.on_status("[Introspection] Updating user profile...")

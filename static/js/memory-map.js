@@ -39,6 +39,9 @@ class MemoryMapViz {
         this.sunPoints     = null;   // THREE.Points — one large point per cluster centroid
         this.orbitalLines  = null;   // THREE.LineSegments — memory → cluster connector lines
         this.orbitalParams = null;   // per-memory orbit data (parallel to memories array)
+        this.laneLines     = null;   // THREE.LineSegments — memory lane connections
+        this._laneMeta     = null;   // [{srcIdx, tgtIdx, vertexStart}] for lane position updates
+        this._memIdxMap    = null;   // {memory_id → index} lookup
         this.nebulaMeshes  = [];     // THREE.Mesh[]  — cluster halos
         this.labelEls     = [];     // HTMLElement[] — cluster theme labels
 
@@ -180,7 +183,8 @@ class MemoryMapViz {
             );
         });
 
-        this._buildOrbitalLines(memories, clusters);  // drawn first (behind everything)
+        this._buildLanes(memories, this.data.lanes || []);  // drawn furthest back
+        this._buildOrbitalLines(memories, clusters);
         this._buildNebulae(clusters);
         this._buildSuns(clusters);
         this._buildStars(memories);
@@ -190,7 +194,7 @@ class MemoryMapViz {
 
         const detail = document.getElementById('memory-map-detail');
         if (detail) detail.innerHTML =
-            '<div class="mm-hint">Hover a star · click a cluster name or legend item to inspect</div>';
+            '<div class="mm-hint">Hover a star · click a cluster name · <span style="color:#4488ff">━</span> semantic lanes · <span style="color:#ffaa44">━</span> research links</div>';
     }
 
     /** Build the Points mesh — one point per memory with per-vertex colour + size. */
@@ -339,6 +343,55 @@ class MemoryMapViz {
     }
 
     /**
+     * Draws memory lanes: semantic (blue) and causal (amber).
+     * Positions are updated every frame in _updateOrbits since stars animate.
+     */
+    _buildLanes(memories, lanes) {
+        if (!lanes || !lanes.length) return;
+
+        // Build ID → index map for fast lookups
+        this._memIdxMap = {};
+        memories.forEach((m, i) => { this._memIdxMap[m.id] = i; });
+
+        const posArr = [];
+        const colArr = [];
+        this._laneMeta = [];
+
+        const semanticCol = new THREE.Color(0x4488ff);
+        const causalCol   = new THREE.Color(0xffaa44);
+
+        lanes.forEach(lane => {
+            const si = this._memIdxMap[lane.source];
+            const ti = this._memIdxMap[lane.target];
+            if (si === undefined || ti === undefined) return;
+
+            const src = memories[si];
+            const tgt = memories[ti];
+            const vertexStart = posArr.length / 3;
+            posArr.push(src.x, src.y, src.z, tgt.x, tgt.y, tgt.z);
+
+            // Scale colour brightness by weight so stronger lanes appear more vivid
+            const w   = Math.min(1, Math.max(0.25, lane.weight || 0.7));
+            const col = lane.type === 'causal' ? causalCol : semanticCol;
+            colArr.push(col.r * w, col.g * w, col.b * w,
+                        col.r * w, col.g * w, col.b * w);
+
+            this._laneMeta.push({ srcIdx: si, tgtIdx: ti, vertexStart });
+        });
+
+        if (!posArr.length) return;
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(posArr), 3));
+        geo.setAttribute('color',    new THREE.BufferAttribute(new Float32Array(colArr), 3));
+
+        this.laneLines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
+            transparent: true, opacity: 0.28, vertexColors: true, depthWrite: false,
+        }));
+        this.scene.add(this.laneLines);
+    }
+
+    /**
      * Builds orbital lines AND computes this.orbitalParams (parallel to memories array).
      * Each memory orbits its cluster centroid at its original UMAP radius; the orbital
      * plane is tilted uniquely per memory using a golden-angle seed for visual variety.
@@ -444,6 +497,18 @@ class MemoryMapViz {
 
         starPos.needsUpdate = true;
         if (linePos) linePos.needsUpdate = true;
+
+        // Sync memory lane endpoints to current animated star positions
+        if (this.laneLines && this._laneMeta) {
+            const lanePos = this.laneLines.geometry.attributes.position;
+            this._laneMeta.forEach(({ srcIdx, tgtIdx, vertexStart }) => {
+                lanePos.setXYZ(vertexStart,
+                    starPos.getX(srcIdx), starPos.getY(srcIdx), starPos.getZ(srcIdx));
+                lanePos.setXYZ(vertexStart + 1,
+                    starPos.getX(tgtIdx), starPos.getY(tgtIdx), starPos.getZ(tgtIdx));
+            });
+            lanePos.needsUpdate = true;
+        }
     }
 
     /** Large glowing points at each cluster centroid — the "suns". Size ∝ member count. */
@@ -776,6 +841,14 @@ class MemoryMapViz {
             this.orbitalLines = null;
         }
         this.orbitalParams = null;
+        if (this.laneLines) {
+            this.scene.remove(this.laneLines);
+            this.laneLines.geometry.dispose();
+            this.laneLines.material.dispose();
+            this.laneLines = null;
+        }
+        this._laneMeta  = null;
+        this._memIdxMap = null;
         this.nebulaMeshes.forEach(({ mesh }) => {
             this.scene.remove(mesh);
             mesh.geometry.dispose();

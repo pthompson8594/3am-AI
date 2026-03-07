@@ -169,12 +169,19 @@ class EmbeddingModel:
                 if self._model is None:
                     import torch
                     from sentence_transformers import SentenceTransformer
-                    self._model = SentenceTransformer(
-                        self.model_name,
+                    _kwargs = dict(
                         trust_remote_code=True,
                         device="cpu",
                         model_kwargs={"torch_dtype": torch.float16},
                     )
+                    try:
+                        # Use local cache — avoids HF Hub network call on every reload
+                        self._model = SentenceTransformer(
+                            self.model_name, local_files_only=True, **_kwargs
+                        )
+                    except Exception:
+                        # First run: cache miss, download from HF Hub
+                        self._model = SentenceTransformer(self.model_name, **_kwargs)
 
     def embed(self, text: str) -> list[float]:
         self._load_model()

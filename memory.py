@@ -167,11 +167,13 @@ class EmbeddingModel:
         if self._model is None:
             with self._lock:
                 if self._model is None:
+                    import torch
                     from sentence_transformers import SentenceTransformer
                     self._model = SentenceTransformer(
                         self.model_name,
                         trust_remote_code=True,
                         device="cpu",
+                        model_kwargs={"torch_dtype": torch.float16},
                     )
 
     def embed(self, text: str) -> list[float]:
@@ -186,6 +188,17 @@ class EmbeddingModel:
             texts, convert_to_numpy=True, normalize_embeddings=True, batch_size=8
         ).tolist()
 
+    def is_loaded(self) -> bool:
+        return self._model is not None
+
+    def unload(self):
+        """Release model weights from RAM. Will reload on next embed() call."""
+        if self._model is not None:
+            del self._model
+            self._model = None
+            import gc
+            gc.collect()
+
 # Shared singleton — loaded once, reused across all MemorySystem instances.
 _SHARED_EMBEDDER: Optional[EmbeddingModel] = None
 
@@ -194,6 +207,16 @@ def get_shared_embedder() -> EmbeddingModel:
     if _SHARED_EMBEDDER is None:
         _SHARED_EMBEDDER = EmbeddingModel()
     return _SHARED_EMBEDDER
+
+
+def _rrf_merge(list_a: list, list_b: list, k: int = 60) -> list:
+    """Reciprocal Rank Fusion — combine two ranked lists into one."""
+    scores: dict = {}
+    for rank, item in enumerate(list_a):
+        scores[item] = scores.get(item, 0.0) + 1.0 / (k + rank + 1)
+    for rank, item in enumerate(list_b):
+        scores[item] = scores.get(item, 0.0) + 1.0 / (k + rank + 1)
+    return sorted(scores, key=lambda x: -scores[x])
 
 
 # ── Memory system ─────────────────────────────────────────────────────────────
@@ -371,6 +394,26 @@ class MemorySystem:
             CREATE INDEX IF NOT EXISTS idx_links_source ON memory_links(source_id);
             CREATE INDEX IF NOT EXISTS idx_links_target ON memory_links(target_id);
         """)
+
+        # FTS5 index for keyword-based (BM25) seed retrieval — standalone table.
+        # No content= option: FTS5 content tables can't be queried in subquery
+        # context (sqlite3 aliases the vtab as T and loses UNINDEXED column names).
+        # Drop + recreate on every startup so schema changes are always applied.
+        conn.execute("DROP TABLE IF EXISTS fts_memories")
+        conn.execute("""
+            CREATE VIRTUAL TABLE fts_memories USING fts5(
+                memory_id UNINDEXED,
+                summary,
+                tokenize='porter ascii'
+            )
+        """)
+        # Rebuild FTS index from memories table on every startup.
+        # Fast (<1ms for hundreds of rows); ensures FTS is always in sync.
+        conn.execute("""
+            INSERT INTO fts_memories(memory_id, summary)
+            SELECT id, summary FROM memories
+        """)
+
         conn.commit()
 
         # One-time migration from memory.json
@@ -539,6 +582,10 @@ class MemorySystem:
                 "INSERT INTO vec_memories(memory_id, embedding) VALUES (?, ?)",
                 (entry.id, emb_bytes),
             )
+            conn.execute(
+                "INSERT OR REPLACE INTO fts_memories(memory_id, summary) VALUES (?, ?)",
+                (entry.id, entry.summary),  # FTS needs plain text, not encrypted
+            )
             conn.commit()
 
     def _save_cluster(self, cluster: MemoryCluster):
@@ -565,6 +612,7 @@ class MemorySystem:
             conn = self._get_conn()
             conn.execute("DELETE FROM memories WHERE id=?", (memory_id,))
             conn.execute("DELETE FROM vec_memories WHERE memory_id=?", (memory_id,))
+            conn.execute("DELETE FROM fts_memories WHERE memory_id=?", (memory_id,))
             conn.execute(
                 "DELETE FROM memory_links WHERE source_id=? OR target_id=?",
                 (memory_id, memory_id),
@@ -977,6 +1025,24 @@ class MemorySystem:
 
     # ── Context retrieval ─────────────────────────────────────────────────────
 
+    def _embedder_loaded(self) -> bool:
+        return self.embedder.is_loaded()
+
+    def _maybe_unload_embedder(self):
+        """Unload the embedding model after a write if configured to do so.
+        Controlled by config key 'embedder_unload_after_write' (default True).
+        Keeps idle RAM ~280MB; write spike is ~540MB for ~1-2s only.
+        """
+        try:
+            config_file = DEFAULT_CONFIG_DIR / "config.json"
+            if config_file.exists():
+                with open(config_file) as f:
+                    if not json.load(f).get("embedder_unload_after_write", True):
+                        return
+        except Exception:
+            pass
+        self.embedder.unload()
+
     def _embed_cached(self, text: str) -> list[float]:
         """Return embedding for text, using a short-TTL LRU cache to avoid
         redundant sentence-transformer calls on repeated queries."""
@@ -1008,24 +1074,56 @@ class MemorySystem:
         if not self.messages:
             return ""
 
-        query_embedding = self._embed_cached(query)
-        emb_bytes = np.array(query_embedding, dtype=np.float32).tobytes()
         conn = self._get_conn()
 
-        # Step 1: seed memories via direct vector similarity
-        seed_rows = conn.execute("""
-            SELECT memory_id, distance FROM vec_memories
-            WHERE embedding MATCH ?
-            ORDER BY distance
-            LIMIT 5
-        """, (emb_bytes,)).fetchall()
+        # Step 1a: FTS5 BM25 keyword seeds — always runs, no embedding needed
+        fts_query = " OR ".join(
+            f'"{w}"' for w in query.split()[:8] if len(w) > 2
+        )
+        fts_seeds: list[str] = []
+        if fts_query:
+            try:
+                fts_rows = conn.execute("""
+                    SELECT memory_id, rank FROM fts_memories
+                    WHERE fts_memories MATCH ?
+                    ORDER BY rank
+                    LIMIT 5
+                """, (fts_query,)).fetchall()
+                fts_seeds = [r["memory_id"] for r in fts_rows if r["memory_id"] in self.messages]
+            except Exception:
+                pass  # malformed query — safe to ignore
 
-        seed_ids = [
-            r["memory_id"] for r in seed_rows
-            if r["memory_id"] in self.messages
-        ]
+        # Step 1b: vec seeds — only if embedder already resident in RAM
+        vec_seeds: list[str] = []
+        query_embedding: Optional[list[float]] = None
+        if self._embedder_loaded():
+            query_embedding = self._embed_cached(query)
+            emb_bytes = np.array(query_embedding, dtype=np.float32).tobytes()
+            vec_rows = conn.execute("""
+                SELECT memory_id FROM vec_memories
+                WHERE embedding MATCH ?
+                ORDER BY distance
+                LIMIT 3
+            """, (emb_bytes,)).fetchall()
+            vec_seeds = [r["memory_id"] for r in vec_rows if r["memory_id"] in self.messages]
+
+        # Step 1c: merge with RRF
+        seed_ids = _rrf_merge(fts_seeds, vec_seeds, k=60)[:5]
 
         if not seed_ids:
+            # Fall back: force-load embedder for a one-off vec search
+            query_embedding = query_embedding or self._embed_cached(query)
+            emb_bytes = np.array(query_embedding, dtype=np.float32).tobytes()
+            seed_rows = conn.execute("""
+                SELECT memory_id FROM vec_memories
+                WHERE embedding MATCH ?
+                ORDER BY distance
+                LIMIT 5
+            """, (emb_bytes,)).fetchall()
+            seed_ids = [r["memory_id"] for r in seed_rows if r["memory_id"] in self.messages]
+
+        if not seed_ids:
+            query_embedding = query_embedding or self._embed_cached(query)
             return self._legacy_cluster_context(query_embedding, max_clusters)
 
         # Step 2: check for lanes — fall back gracefully if none exist yet.
@@ -1041,6 +1139,7 @@ class MemorySystem:
             ranked = [(sid, 1.0) for sid in seed_ids]
 
         if not ranked:
+            query_embedding = query_embedding or self._embed_cached(query)
             return self._legacy_cluster_context(query_embedding, max_clusters)
 
         # Step 3: format grouped by cluster
@@ -1441,6 +1540,7 @@ class MemorySystem:
                 self._save_cluster(best_cluster)
 
         self.stats["total_messages"] = len(self.messages)
+        self._maybe_unload_embedder()
         return entry_id
 
     async def add_research_finding(
@@ -1539,6 +1639,7 @@ class MemorySystem:
             )
             conn.commit()
 
+        self._maybe_unload_embedder()
         return new_lanes
 
     def resolve_conflicts(self) -> dict:
@@ -2359,6 +2460,10 @@ class MemorySystem:
                     conn.execute(
                         "INSERT OR IGNORE INTO vec_memories (memory_id, embedding) VALUES (?, ?)",
                         (mem_id, emb_bytes),
+                    )
+                    conn.execute(
+                        "INSERT OR REPLACE INTO fts_memories(memory_id, summary) VALUES (?, ?)",
+                        (mem_id, m["summary"]),
                     )
                     self.messages[mem_id] = MemoryEntry(
                         id=mem_id,

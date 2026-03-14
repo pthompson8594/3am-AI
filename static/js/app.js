@@ -91,6 +91,38 @@ class App {
         document.getElementById('settings-modal').addEventListener('click', (e) => {
             if (e.target.classList.contains('modal')) this.closeModals();
         });
+        document.getElementById('ingest-modal').addEventListener('click', (e) => {
+            if (e.target.classList.contains('modal')) this.closeModals();
+        });
+
+        // Ingest modal
+        document.getElementById('ingest-btn').addEventListener('click', () => this.openIngestModal());
+        document.getElementById('ingest-submit-btn').addEventListener('click', () => this.handleIngestSubmit());
+        document.querySelectorAll('.ingest-tab').forEach(tab => {
+            tab.addEventListener('click', () => this.handleIngestTabSwitch(tab.dataset.tab));
+        });
+        document.getElementById('ingest-file-input').addEventListener('change', (e) => {
+            const f = e.target.files[0];
+            if (f) document.getElementById('file-drop-label').textContent = f.name;
+        });
+        const dropArea = document.getElementById('file-drop-area');
+        dropArea.addEventListener('dragover', (e) => { e.preventDefault(); dropArea.classList.add('drag-over'); });
+        dropArea.addEventListener('dragleave', () => dropArea.classList.remove('drag-over'));
+        dropArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropArea.classList.remove('drag-over');
+            const f = e.dataTransfer.files[0];
+            if (f) {
+                // FileList is read-only; use DataTransfer to assign dropped file to the input
+                const dt = new DataTransfer();
+                dt.items.add(f);
+                document.getElementById('ingest-file-input').files = dt.files;
+                document.getElementById('file-drop-label').textContent = f.name;
+            }
+        });
+
+        // Ephemeral badge clear button
+        document.getElementById('ephemeral-clear-btn').addEventListener('click', () => this.clearEphemeralContext());
 
         // Custom Tools Panel
         this._bindToolsPanel();
@@ -577,6 +609,9 @@ class App {
         });
 
         document.querySelector('.sidebar').classList.remove('open');
+
+        // Clear ephemeral document context on new chat
+        this.clearEphemeralContext();
     }
 
     // --- Chat ---
@@ -1171,6 +1206,93 @@ class App {
         document.querySelectorAll('.modal').forEach(modal => {
             modal.classList.add('hidden');
         });
+    }
+
+    // --- Document Ingestion ---
+
+    openIngestModal() {
+        // Reset state
+        document.getElementById('ingest-file-input').value = '';
+        document.getElementById('file-drop-label').textContent = 'Click to select or drag a file here';
+        document.getElementById('ingest-url-input').value = '';
+        document.getElementById('ingest-persist-toggle').checked = false;
+        const status = document.getElementById('ingest-status');
+        status.className = 'ingest-status hidden';
+        status.textContent = '';
+        document.getElementById('ingest-submit-btn').disabled = false;
+        // Default to file tab
+        this.handleIngestTabSwitch('file');
+        document.getElementById('ingest-modal').classList.remove('hidden');
+    }
+
+    handleIngestTabSwitch(tab) {
+        document.querySelectorAll('.ingest-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+        document.getElementById('ingest-file-panel').classList.toggle('hidden', tab !== 'file');
+        document.getElementById('ingest-url-panel').classList.toggle('hidden', tab !== 'url');
+    }
+
+    async handleIngestSubmit() {
+        const fileInput = document.getElementById('ingest-file-input');
+        const urlInput = document.getElementById('ingest-url-input').value.trim();
+        const persist = document.getElementById('ingest-persist-toggle').checked;
+        const status = document.getElementById('ingest-status');
+        const submitBtn = document.getElementById('ingest-submit-btn');
+
+        const activeTab = document.querySelector('.ingest-tab.active')?.dataset.tab;
+        const hasFile = activeTab === 'file' && fileInput.files.length > 0;
+        const hasUrl = activeTab === 'url' && urlInput.length > 0;
+
+        if (!hasFile && !hasUrl) {
+            status.className = 'ingest-status error';
+            status.textContent = 'Select a file or enter a URL.';
+            status.classList.remove('hidden');
+            return;
+        }
+
+        submitBtn.disabled = true;
+        status.className = 'ingest-status loading';
+        status.textContent = persist
+            ? 'Extracting propositions with LLM — this may take a minute…'
+            : 'Loading document into session context…';
+        status.classList.remove('hidden');
+
+        const formData = new FormData();
+        if (hasFile) formData.append('file', fileInput.files[0]);
+        if (hasUrl)  formData.append('url', urlInput);
+        formData.append('persist', persist ? 'true' : 'false');
+
+        try {
+            const resp = await fetch('/api/ingest/document', {
+                method: 'POST',
+                body: formData,
+            });
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.detail || 'Ingestion failed');
+
+            status.className = 'ingest-status success';
+            status.textContent = data.message;
+
+            if (data.mode === 'ephemeral') {
+                const badge = document.getElementById('ephemeral-badge');
+                document.getElementById('ephemeral-badge-name').textContent = data.doc_name;
+                badge.classList.remove('hidden');
+            }
+
+            // Auto-close after a moment on success
+            setTimeout(() => this.closeModals(), 1800);
+        } catch (err) {
+            status.className = 'ingest-status error';
+            status.textContent = err.message;
+            submitBtn.disabled = false;
+        }
+    }
+
+    async clearEphemeralContext() {
+        try {
+            await fetch('/api/ingest/ephemeral', { method: 'DELETE' });
+        } catch (_) { /* best-effort */ }
+        document.getElementById('ephemeral-badge').classList.add('hidden');
+        document.getElementById('ephemeral-badge-name').textContent = '';
     }
 
     toggleToolOutput(toolId) {

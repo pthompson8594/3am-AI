@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.0
+
+### Document Ingestion
+- New **[+]** button in chat input opens a document ingestion panel
+- Accepts local files (`.txt`, `.md`, `.pdf`, `.docx`, `.csv`, `.log`, `.rst`) or a URL
+- **Ephemeral mode** (default): raw text injected into session context only — no memory writes, cleared on new chat
+- **Persistent mode** ("Learn this" checkbox): LLM extracts atomic propositions organised into logical sections; stored permanently in memory
+- Three PPR lane types built automatically at ingestion: `semantic` (existing), `sequential` (reading-order within sections), `hierarchical` (proposition → section → document)
+- Sequential lanes let PPR surface prerequisites/follow-ons; hierarchical lanes let PPR walk up to section/document context (RAPTOR-equivalent without a separate index)
+- Ephemeral badge shown above input with ✕ to clear; auto-cleared on new conversation
+- Viz cache invalidated on persist so new memory nodes appear in the star-map immediately
+- New file: `ingest.py` — text extraction + LLM proposition extraction
+- New `MemorySystem` methods: `_build_sequential_links`, `_build_hierarchical_links`, `store_document`
+- New endpoints: `POST /api/ingest/document`, `DELETE /api/ingest/ephemeral`
+- New optional dependencies: `pymupdf`, `pypdf`, `python-docx`
+
 ## 1.1.1
 
 ### ?analyze command

@@ -439,7 +439,6 @@ class CommandHandler:
                 f"Topics identified: {stats['total_topics']}",
                 f"Topics researched: {stats['researched_topics']}",
                 f"Insights gathered: {stats['total_insights']}",
-                f"Unshared insights: {stats['unshared_insights']}",
                 "",
                 "Commands: `?research on`, `?research off`, `?findings`, `?learn <topic>`"
             ]

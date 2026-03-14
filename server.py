@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, AsyncGenerator
 
-from fastapi import FastAPI, HTTPException, Depends, Request, Response, Cookie, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Depends, Request, Response, Cookie, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +28,7 @@ from pydantic import BaseModel
 import httpx
 
 from auth import AuthSystem, AuthError, User
+from ingest import extract_text, ingest_document, count_propositions
 from scheduler import IntrospectionScheduler, SchedulerConfig, CheckResult
 from data_security import SecureUserData, DataEncryptor
 from tools import ToolExecutor, parse_inline_tool_calls, PendingApproval
@@ -198,6 +199,7 @@ class UserLLMCore:
         self.model = _DETECTED_MODEL
         self.client = httpx.AsyncClient(timeout=120.0)
         self.conversations: dict[str, list] = {}
+        self._ephemeral_context: str = ""   # text injected into every prompt until cleared
         
         # Ensure user directory exists
         self.user_data.base_path.mkdir(parents=True, exist_ok=True)
@@ -872,6 +874,10 @@ class UserLLMCore:
             memory_ctx = self._get_memory_context(query)
         if memory_ctx:
             prompt += f"\n\n{memory_ctx}"
+
+        # Inject ephemeral document context (session-only, not stored to memory)
+        if self._ephemeral_context:
+            prompt += f"\n\n[DOCUMENT CONTEXT — session only, do not treat as long-term memory]\n{self._ephemeral_context}"
 
         return prompt
     
@@ -1770,6 +1776,107 @@ async def retry_tool_code(tool_id: str, request: ToolRetryCodeRequest, user: Use
     if not result:
         raise HTTPException(status_code=500, detail="Code regeneration failed — try again")
     return result.to_dict()
+
+
+# --- Document Ingestion ---
+
+@app.post("/api/ingest/document")
+async def ingest_document_endpoint(
+    file: Optional[UploadFile] = File(None),
+    url: Optional[str] = Form(None),
+    persist: bool = Form(False),
+    user: User = Depends(get_current_user),
+):
+    """
+    Ingest a document into the assistant.
+
+    persist=False (default): raw text is stored as ephemeral context, injected
+      into every system prompt for this session. Cleared by DELETE /api/ingest/ephemeral.
+
+    persist=True: LLM extracts atomic propositions which are stored permanently
+      in the memory system with sequential and hierarchical PPR lanes.
+    """
+    core = get_user_core(user)
+
+    # --- Obtain raw text ---
+    doc_name = "document"
+    text = ""
+
+    if file and file.filename:
+        doc_name = file.filename
+        raw_bytes = await file.read()
+        text = extract_text(doc_name, raw_bytes)
+        if not text.strip():
+            raise HTTPException(status_code=422, detail="Could not extract text from this file type")
+
+    elif url and url.strip():
+        doc_name = url.strip()
+        try:
+            resp = await core.client.get(doc_name, timeout=30.0, follow_redirects=True)
+            resp.raise_for_status()
+            content_type = resp.headers.get("content-type", "")
+            if "pdf" in content_type:
+                text = extract_text("page.pdf", resp.content)
+            else:
+                text = resp.text
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"Failed to fetch URL: {exc}")
+
+    else:
+        raise HTTPException(status_code=422, detail="Provide either a file or a URL")
+
+    if not text.strip():
+        raise HTTPException(status_code=422, detail="Document appears to be empty")
+
+    # --- Ephemeral mode: inject raw text into session context ---
+    if not persist:
+        # Truncate to a reasonable size for direct context injection
+        max_ctx = 80_000
+        injected = text[:max_ctx]
+        if len(text) > max_ctx:
+            injected += f"\n\n[Truncated — showing first {max_ctx} characters]"
+        core._ephemeral_context = f"## {doc_name}\n\n{injected}"
+        char_count = len(injected)
+        return {
+            "mode": "ephemeral",
+            "doc_name": doc_name,
+            "chars": char_count,
+            "message": f"Document loaded into session context ({char_count:,} chars). It will not be stored in memory.",
+        }
+
+    # --- Persistent mode: LLM proposition extraction + memory storage ---
+    try:
+        result = await ingest_document(text, doc_name, core.client, core.llm_url, core.model)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Ingestion LLM call failed: {exc}")
+
+    try:
+        stored = await core.memory.store_document(result)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to store document: {exc}")
+
+    # Invalidate viz cache so new nodes appear immediately
+    core.memory._viz_cache = None
+
+    return {
+        "mode": "persistent",
+        "doc_name": doc_name,
+        "doc_summary": result.get("doc_summary", ""),
+        "sections": stored["sections"],
+        "propositions": stored["propositions"],
+        "message": (
+            f"Stored {stored['propositions']} propositions across "
+            f"{stored['sections']} sections from \"{doc_name}\"."
+        ),
+    }
+
+
+@app.delete("/api/ingest/ephemeral")
+async def clear_ephemeral_context(user: User = Depends(get_current_user)):
+    """Clear the ephemeral document context for this session."""
+    core = get_user_core(user)
+    core._ephemeral_context = ""
+    return {"ok": True}
 
 
 # --- Static Files & Frontend ---

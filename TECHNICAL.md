@@ -1,8 +1,56 @@
 # 3AM — Technical Reference
 
-Web-based LLM assistant with **Torque Clustering memory system, SQLite + sqlite-vec storage, multi-user support, ChatGPT-like interface, self-created custom tools, decision gate, logprobs-based confidence scoring, feedback-driven behavior adaptation, and Fernet field-level encryption at rest**.
+Web-based LLM assistant with **Torque Clustering memory system, SQLite + sqlite-vec storage, multi-user support, ChatGPT-like interface, self-created custom tools, decision gate, logprobs-based confidence scoring, feedback-driven behavior adaptation, Fernet field-level encryption at rest, and document ingestion with PPR-linked proposition storage**.
 
-## What's New in v1.1.0 (current)
+## What's New in v1.2.0 (current)
+
+### Document Ingestion
+
+A **[+]** button in the chat input opens an ingestion panel that accepts a local file or URL and stores it in one of two modes:
+
+**Ephemeral mode** (default — "Learn this" unchecked):
+- Raw text injected into `_ephemeral_context` on `UserLLMCore`
+- Appended to every system prompt as a `[DOCUMENT CONTEXT — session only]` block
+- Cleared automatically on new chat or via the ✕ badge in the UI
+- No DB writes; zero cost beyond context tokens
+- Truncated to 80K chars if the document is large
+
+**Persistent mode** ("Learn this" checked):
+- LLM reads the full document (up to 96K chars / ~24K tokens, leaving 8K headroom for output)
+- Returns structured JSON: `doc_summary`, `sections[]` each with `name`, `summary`, `propositions[]`
+- Each proposition stored via `_store_fact`: dedup check, embedding, vec table, FTS5 index
+- Three link types built into the `memory_links` lane graph:
+  - `semantic` — bidirectional similarity lanes (built inside `_store_fact`, existing mechanism)
+  - `sequential` — bidirectional between consecutive propositions within each section (weight 0.65)
+  - `hierarchical` — proposition ↔ section summary (0.80), section ↔ doc summary (0.70)
+- Viz cache invalidated on persist so new nodes appear in the star-map immediately
+
+**PPR retrieval benefit:** when any document proposition is retrieved as a seed, Personalized PageRank walks sequential lanes to surface prerequisites/follow-ons, and hierarchical lanes to surface the section/document context — equivalent to RAPTOR-style tree retrieval without a separate index.
+
+**Supported formats:**
+
+| Extension | Library |
+|-----------|---------|
+| `.txt`, `.md`, `.csv`, `.log`, `.rst` | stdlib |
+| `.pdf` | `pymupdf` (preferred) → `pypdf` (fallback) |
+| `.docx` | `python-docx` |
+
+**New endpoints:**
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /api/ingest/document` | Multipart: `file` or `url` field, `persist` bool. Returns mode, counts, message. |
+| `DELETE /api/ingest/ephemeral` | Clear ephemeral document context for this session. |
+
+**New file:** `ingest.py` — `extract_text()`, `ingest_document()`, `count_propositions()`.
+
+**New `MemorySystem` methods:** `_build_sequential_links()`, `_build_hierarchical_links()`, `store_document()`.
+
+**New optional dependencies:** `pymupdf>=1.24.0`, `pypdf>=4.0.0`, `python-docx>=1.1.0`.
+
+---
+
+## What's New in v1.1.0
 
 ### Fernet Field-Level Encryption
 
@@ -665,6 +713,10 @@ curl -X POST "http://localhost:8000/api/introspection/trigger?force_recluster=tr
 - `GET /api/behavior-profile` - Current learned behavior profile
 - `PATCH /api/behavior-profile` - Update profile fields
 
+### Document Ingestion (v1.2)
+- `POST /api/ingest/document` - Ingest file (multipart) or URL; `persist=false` → ephemeral context, `persist=true` → proposition extraction + memory storage
+- `DELETE /api/ingest/ephemeral` - Clear ephemeral document context for this session
+
 ## Files
 
 | File | Description |
@@ -682,6 +734,7 @@ curl -X POST "http://localhost:8000/api/introspection/trigger?force_recluster=tr
 | `decision_gate.py` | **MK13:** Hybrid rule+LLM decision gate (`GateDecision`) |
 | `experience_log.py` | **MK13:** SQLite-backed interaction + feedback log |
 | `behavior_profile.py` | **MK13:** Learned behavioral profile, introspection-driven updates |
+| `ingest.py` | **v1.2:** Document text extraction + LLM proposition extraction for ingestion |
 | `test_synthetic.py` | **MK13:** Standalone closed-loop simulation — 3-week feedback scenario, no server needed |
 | `torque_clustering/` | Torque Clustering algorithm (MK10) |
 | `static/` | Frontend assets (HTML, CSS, JS) |

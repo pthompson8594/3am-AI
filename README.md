@@ -45,6 +45,14 @@ Every response is logged with its confidence score, gate decision, and your feed
 ### Proactive Research
 The system autonomously researches topics you've discussed, bringing back current information during idle hours. A four-layer decision gate prevents over-research: only clusters with recent activity are considered, topic generation is rate-limited to once every 5 days, topics that yield poor results are backed off for a week, and the cooldown shortens automatically when the AI has been giving low-confidence answers. Research findings are written into long-term memory and expire from the research file after 30 days. Results are browsable and deletable through the UI.
 
+### Document Ingestion
+Feed documents directly into the assistant from the chat input. Click **[+]** to open the ingestion panel, select a local file or paste a URL, and choose how the document should be handled:
+
+- **Session only (ephemeral):** the raw text is injected into the active conversation's context window. Nothing is written to memory — useful for working on a code file, reviewing a document, or asking questions about one-off content.
+- **Learn this (persistent):** the LLM reads the full document and extracts atomic propositions organised into logical sections. Propositions are stored as individual memory nodes with three types of PPR lanes built automatically — semantic (similarity-based), sequential (reading-order within each section), and hierarchical (proposition → section → document). This extends the memory lane graph to include structured external knowledge, with the same Personalized PageRank retrieval that serves conversational memories.
+
+Supported formats: `.txt`, `.md`, `.pdf`, `.docx`, `.csv`, `.log`, `.rst`. PDF support requires `pymupdf` or `pypdf`; DOCX requires `python-docx`.
+
 ### 3D Memory Visualization
 A live star-map shows your memory space — clusters as suns, individual memories as orbiting planets. Memory lanes are rendered as edges between planets: solid lines for semantic connections, dashed directional lines for causal lanes pointing toward research findings. Useful for spotting cluster health and understanding how your AI connects what it knows about you.
 
@@ -203,7 +211,7 @@ Everything stays on your machine. Per-user data in `~/.local/share/3am/users/{us
 
 | File | What it holds |
 |------|---------------|
-| `memory.db` | Memories, clusters, embeddings (sqlite-vec), memory lanes, experience log |
+| `memory.db` | Memories, clusters, embeddings (sqlite-vec), memory lanes, experience log, document-ingested propositions |
 | `behavior_profile.json` | Learned behavioral preferences |
 | `conversations/` | Full chat history |
 | `research.json` | Research topics and findings |

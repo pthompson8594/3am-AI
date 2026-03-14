@@ -39,6 +39,15 @@ elif [ -f "/usr/bin/llama-server" ]; then
     LLAMA_SERVER="/usr/bin/llama-server"
 fi
 
+LLAMA_RPC_SERVER=""
+if command -v llama-rpc-server &> /dev/null; then
+    LLAMA_RPC_SERVER="llama-rpc-server"
+elif [ -f "/usr/bin/llama-rpc-server" ]; then
+    LLAMA_RPC_SERVER="/usr/bin/llama-rpc-server"
+else
+    LLAMA_RPC_SERVER="llama-rpc-server"  # same package as llama-server, assume present
+fi
+
 if [ -z "$LLAMA_SERVER" ]; then
     echo -e "${YELLOW}Warning: llama-server not found${NC}"
     echo ""
@@ -165,13 +174,13 @@ if [ ! -f "$PROD_MODEL_PATH" ]; then
         MODEL_URL="https://huggingface.co/Qwen/Qwen3-14B-GGUF/resolve/main/${PROD_MODEL}"
         echo "Downloading from: $MODEL_URL"
         echo "This may take a while..."
-        
+
         if command -v wget &> /dev/null; then
             wget --progress=bar:force -O "$PROD_MODEL_PATH" "$MODEL_URL"
         elif command -v curl &> /dev/null; then
             curl -L --progress-bar -o "$PROD_MODEL_PATH" "$MODEL_URL"
         fi
-        
+
         echo -e "${GREEN}Download complete!${NC}"
     fi
 fi
@@ -212,22 +221,41 @@ esac
 YARN_FLAGS="--rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 32768 --flash-attn on"
 echo -e "${GREEN}GPU type: ${GPU_TYPE} — using --n-gpu-layers ${GPU_LAYERS}${NC}"
 
-# Optional: RPC workers for distributed inference
+LOCAL_RPC_PORT=50052
+
+# Local RPC worker service — always created, always runs on this machine.
+# llama-server uses --rpc to offload layers to it (and any remote workers).
+echo -e "${YELLOW}Creating local RPC worker service (port ${LOCAL_RPC_PORT})...${NC}"
+cat > "$SYSTEMD_DIR/llama-rpc-local.service" << EOF
+[Unit]
+Description=Llama.cpp RPC Local Worker
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${LLAMA_RPC_SERVER} --host 0.0.0.0 --port ${LOCAL_RPC_PORT}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+
+# Optional: additional remote RPC workers for distributed inference
 echo ""
-echo -e "${YELLOW}RPC distributed inference (optional):${NC}"
-echo "  Run start-rpc-worker.sh on each remote GPU machine, then enter"
-echo "  their addresses here to split large models across multiple GPUs."
-read -p "Configure RPC workers? [y/N] " -n 1 -r
+echo -e "${YELLOW}RPC distributed inference:${NC}"
+echo "  Local RPC worker will run on this machine (port ${LOCAL_RPC_PORT})."
+echo "  Add remote GPU machines to split large models across multiple GPUs."
+read -p "Add remote RPC workers? [y/N] " -n 1 -r
 echo ""
-RPC_SERVERS=""
-RPC_FLAG=""
+RPC_SERVERS="localhost:${LOCAL_RPC_PORT}"
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    read -p "RPC worker addresses (comma-separated host:port, e.g. 192.168.1.10:50052): " RPC_SERVERS
-    if [ -n "$RPC_SERVERS" ]; then
-        RPC_FLAG="--rpc ${RPC_SERVERS}"
+    read -p "Remote RPC addresses (comma-separated host:port, e.g. 192.168.1.10:50052): " REMOTE_RPC
+    if [ -n "$REMOTE_RPC" ]; then
+        RPC_SERVERS="${RPC_SERVERS},${REMOTE_RPC}"
         echo -e "${GREEN}RPC workers: ${RPC_SERVERS}${NC}"
 
-        # Generate a service template for worker machines (copy to each worker)
+        # Generate a service template for remote worker machines
         cat > "$SCRIPT_DIR/llama-rpc-worker.service" << EOF
 [Unit]
 Description=Llama.cpp RPC Worker
@@ -238,7 +266,7 @@ Type=simple
 User=$USER
 ExecStart=llama-rpc-server --host 0.0.0.0 --port 50052
 Restart=on-failure
-RestartSec=10
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
@@ -247,16 +275,59 @@ EOF
         echo "  Copy this file to each worker machine and enable it there."
     fi
 fi
+RPC_FLAG="--rpc ${RPC_SERVERS}"
+
+# Count RPC workers to know how many tensor-split values to ask for
+RPC_WORKER_COUNT=$(echo "$RPC_SERVERS" | tr ',' '\n' | wc -l)
+TENSOR_SPLIT_FLAG=""
+echo ""
+echo -e "${YELLOW}Tensor split (${RPC_WORKER_COUNT} RPC workers: ${RPC_SERVERS}):${NC}"
+echo "  For MoE or uneven GPU models, set a manual split ratio."
+echo "  Enter one integer weight per worker in RPC order, comma-separated."
+echo "  Example: 3,4 means worker 1 gets 3 parts, worker 2 gets 4 parts."
+echo "  Leave blank to let llama.cpp auto-distribute by reported VRAM."
+read -p "Tensor split weights (or press Enter to skip): " TENSOR_SPLIT
+if [ -n "$TENSOR_SPLIT" ]; then
+    TENSOR_SPLIT_FLAG="--tensor-split ${TENSOR_SPLIT}"
+    echo -e "${GREEN}Tensor split: ${TENSOR_SPLIT}${NC}"
+fi
+
+# Context size — default differs between RPC (larger ok) and CPU-only
+echo ""
+read -p "Context size [default: ${CTX}]: " CTX_INPUT
+if [ -n "$CTX_INPUT" ]; then
+    CTX="$CTX_INPUT"
+fi
+echo -e "${GREEN}Context size: ${CTX}${NC}"
+
+# YaRN extended context — useful for CPU/single-GPU, often skipped with RPC+tensor-split
+YARN_FLAGS_FINAL="$YARN_FLAGS"
+if [ -n "$TENSOR_SPLIT_FLAG" ]; then
+    echo ""
+    read -p "Disable YaRN extended context flags (recommended when using tensor-split)? [Y/n] " -n 1 -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+        YARN_FLAGS_FINAL=""
+        echo -e "${GREEN}YaRN flags disabled.${NC}"
+    fi
+fi
+
+# --n-gpu-layers must be omitted when --tensor-split is set — it overrides the split
+GPU_LAYERS_FLAG=""
+if [ -z "$TENSOR_SPLIT_FLAG" ]; then
+    GPU_LAYERS_FLAG="--n-gpu-layers ${GPU_LAYERS}"
+fi
 
 # Create LLM server service
 cat > "$SYSTEMD_DIR/llama-server.service" << EOF
 [Unit]
 Description=Llama.cpp LLM Server
-After=network.target
+After=network.target llama-rpc-local.service
+Wants=llama-rpc-local.service
 
 [Service]
 Type=simple
-ExecStart=${LLAMA_SERVER} --model ${HOME}/models/${PROD_MODEL} --port 8080 --host 0.0.0.0 --n-gpu-layers ${GPU_LAYERS} --ctx-size ${CTX} --parallel ${PARALLEL} ${YARN_FLAGS} ${RPC_FLAG}
+ExecStart=${LLAMA_SERVER} --model ${HOME}/models/${PROD_MODEL} --port 8080 --host 0.0.0.0 ${GPU_LAYERS_FLAG} --ctx-size ${CTX} --parallel ${PARALLEL} ${YARN_FLAGS_FINAL} ${RPC_FLAG} ${TENSOR_SPLIT_FLAG}
 Restart=on-failure
 RestartSec=10
 
@@ -288,21 +359,52 @@ Environment=LLM_URL=http://localhost:8080
 WantedBy=multi-user.target
 EOF
 
-cat > "$SCRIPT_DIR/llama-server.service" << EOF
+cat > "$SCRIPT_DIR/llama-rpc-local.service" << EOF
 [Unit]
-Description=Llama.cpp LLM Server
+Description=Llama.cpp RPC Local Worker
 After=network.target
 
 [Service]
 Type=simple
 User=$USER
-ExecStart=${LLAMA_SERVER} --model ${HOME}/models/${PROD_MODEL} --port 8080 --host 0.0.0.0 --n-gpu-layers ${GPU_LAYERS} --ctx-size ${CTX} --parallel ${PARALLEL} ${YARN_FLAGS} ${RPC_FLAG}
+ExecStart=${LLAMA_RPC_SERVER} --host 0.0.0.0 --port ${LOCAL_RPC_PORT}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > "$SCRIPT_DIR/llama-server.service" << EOF
+[Unit]
+Description=Llama.cpp LLM Server
+After=network.target llama-rpc-local.service
+Wants=llama-rpc-local.service
+
+[Service]
+Type=simple
+User=$USER
+ExecStart=${LLAMA_SERVER} --model ${HOME}/models/${PROD_MODEL} --port 8080 --host 0.0.0.0 ${GPU_LAYERS_FLAG} --ctx-size ${CTX} --parallel ${PARALLEL} ${YARN_FLAGS_FINAL} ${RPC_FLAG} ${TENSOR_SPLIT_FLAG}
 Restart=on-failure
 RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# Reload systemd so it sees any service file changes
+systemctl --user daemon-reload 2>/dev/null || true
+
+# If services are already running, restart them to pick up new config
+if systemctl --user is-active --quiet llama-rpc-local 2>/dev/null; then
+    echo -e "${YELLOW}Restarting llama-rpc-local service...${NC}"
+    systemctl --user restart llama-rpc-local
+fi
+if systemctl --user is-active --quiet 3am 2>/dev/null; then
+    echo -e "${YELLOW}Restarting 3am service...${NC}"
+    systemctl --user restart 3am
+    echo -e "${GREEN}Service restarted.${NC}"
+fi
 
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
@@ -318,17 +420,18 @@ echo "  Start manually:"
 echo "    3am"
 echo ""
 echo "  Start as user service:"
-echo "    systemctl --user enable 3am llama-server"
-echo "    systemctl --user start 3am llama-server"
+echo "    systemctl --user enable llama-rpc-local llama-server 3am"
+echo "    systemctl --user start llama-rpc-local llama-server 3am"
 echo ""
 echo -e "${YELLOW}Usage (Server - system services):${NC}"
 echo ""
 echo "  Install system services:"
+echo "    sudo cp $SCRIPT_DIR/llama-rpc-local.service /etc/systemd/system/"
 echo "    sudo cp $SCRIPT_DIR/llama-server.service /etc/systemd/system/"
 echo "    sudo cp $SCRIPT_DIR/3am.service /etc/systemd/system/"
 echo "    sudo systemctl daemon-reload"
-echo "    sudo systemctl enable 3am"
-echo "    sudo systemctl start 3am"
+echo "    sudo systemctl enable llama-rpc-local llama-server 3am"
+echo "    sudo systemctl start llama-rpc-local llama-server 3am"
 echo ""
 echo "  View logs:"
 echo "    journalctl -u 3am -f"

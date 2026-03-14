@@ -52,3 +52,10 @@ apscheduler>=3.10.0
 # 3D memory map dimensionality reduction (optional but recommended)
 # Falls back to numpy PCA if not installed
 umap-learn>=0.5.0
+
+# Document ingestion (all optional — install only what you need)
+# PDF extraction — pymupdf is faster and handles complex layouts; pypdf is the fallback
+pymupdf>=1.24.0        # PDF text extraction (preferred)
+pypdf>=4.0.0           # PDF text extraction (fallback if pymupdf unavailable)
+python-docx>=1.1.0     # DOCX text extraction
+# txt / md / csv / log / rst require no extra packages (stdlib)

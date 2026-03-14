@@ -703,6 +703,158 @@ class MemorySystem:
 
         return len(links)
 
+    def _build_sequential_links(self, prop_ids: list[str]) -> int:
+        """
+        Build bidirectional sequential lanes between consecutive proposition IDs.
+
+        These lanes encode reading order within a document section — when any
+        proposition is retrieved, PPR walks both forward and backward along the
+        chain, surfacing prerequisites and follow-ons automatically.
+
+        Weight is fixed at 0.65 — strong enough to be surfaced by PPR but lower
+        than high-similarity semantic lanes so they don't swamp unrelated queries.
+        """
+        if len(prop_ids) < 2:
+            return 0
+
+        now = time.time()
+        links = []
+        for i in range(len(prop_ids) - 1):
+            a, b = prop_ids[i], prop_ids[i + 1]
+            if a not in self.messages or b not in self.messages:
+                continue
+            links.append((a, b, 0.65, "sequential", now))
+            links.append((b, a, 0.65, "sequential", now))
+
+        if links:
+            with self._write_lock:
+                conn = self._get_conn()
+                conn.executemany("""
+                    INSERT OR REPLACE INTO memory_links
+                    (source_id, target_id, weight, link_type, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                """, links)
+                conn.commit()
+            self._lanes_ready = True
+
+        return len(links) // 2
+
+    def _build_hierarchical_links(
+        self, prop_ids: list[str], section_id: str, doc_id: str
+    ) -> int:
+        """
+        Build hierarchical lanes: each proposition → its section summary,
+        and the section summary → the document summary.
+
+        These lanes let PPR walk up from a retrieved proposition to its section
+        context, and from a section to the full document summary — similar to
+        RAPTOR's tree traversal but driven by PPR rather than a separate index.
+
+        Weights:
+          prop → section  : 0.80  (high — section provides essential context)
+          section → doc   : 0.70  (meaningful — document summary provides top-level framing)
+        Both directions are stored so retrieval can start at any level.
+        """
+        now = time.time()
+        links = []
+
+        for pid in prop_ids:
+            if pid not in self.messages or section_id not in self.messages:
+                continue
+            links.append((pid,        section_id, 0.80, "hierarchical", now))
+            links.append((section_id, pid,        0.80, "hierarchical", now))
+
+        if section_id in self.messages and doc_id in self.messages:
+            links.append((section_id, doc_id, 0.70, "hierarchical", now))
+            links.append((doc_id, section_id, 0.70, "hierarchical", now))
+
+        if links:
+            with self._write_lock:
+                conn = self._get_conn()
+                conn.executemany("""
+                    INSERT OR REPLACE INTO memory_links
+                    (source_id, target_id, weight, link_type, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                """, links)
+                conn.commit()
+            self._lanes_ready = True
+
+        return len(links)
+
+    async def store_document(self, ingestion_result: dict) -> dict:
+        """
+        Store a fully-extracted document (from ingest.ingest_document) into memory.
+
+        Stores:
+          - One doc-level summary memory
+          - One section-level summary memory per section
+          - All proposition memories
+
+        Then builds:
+          - Semantic lanes (existing _build_semantic_links, called inside _store_fact)
+          - Sequential lanes between propositions within each section
+          - Hierarchical lanes: proposition → section → document
+
+        Returns a summary dict with counts.
+        """
+        doc_name = ingestion_result.get("doc_name", "document")
+        doc_summary = ingestion_result.get("doc_summary", "").strip()
+        sections = ingestion_result.get("sections", [])
+
+        user_msg = f"[Ingested document: {doc_name}]"
+
+        # Store document-level summary
+        doc_id = None
+        if doc_summary:
+            doc_id = await self._store_fact(
+                {"summary": doc_summary[:200], "category": "document", "priority": 4},
+                user_message=user_msg,
+            )
+
+        total_props = 0
+        section_count = 0
+
+        for section in sections:
+            sec_name = section.get("name", "")
+            sec_summary = section.get("summary", "").strip()
+            propositions = section.get("propositions", [])
+
+            # Store section-level summary
+            section_id = None
+            if sec_summary:
+                sec_label = f"{doc_name} — {sec_name}: {sec_summary}"
+                section_id = await self._store_fact(
+                    {"summary": sec_label[:200], "category": "document_section", "priority": 3},
+                    user_message=user_msg,
+                )
+                section_count += 1
+
+            # Store propositions and collect their IDs for link building
+            prop_ids = []
+            for prop in propositions:
+                pid = await self._store_fact(prop, user_message=user_msg)
+                if pid:
+                    prop_ids.append(pid)
+                    total_props += 1
+
+            # Build sequential lanes within this section
+            if prop_ids:
+                self._build_sequential_links(prop_ids)
+
+            # Build hierarchical lanes for this section
+            if prop_ids and section_id and doc_id:
+                self._build_hierarchical_links(prop_ids, section_id, doc_id)
+            elif prop_ids and doc_id and not section_id:
+                # No section summary — link props directly to doc
+                self._build_hierarchical_links(prop_ids, doc_id, doc_id)
+
+        return {
+            "doc_name": doc_name,
+            "doc_id": doc_id,
+            "sections": section_count,
+            "propositions": total_props,
+        }
+
     def _save_profile(self, profile: str):
         """Persist the compact user profile to meta table."""
         enc = self.encryptor

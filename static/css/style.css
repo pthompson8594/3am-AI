@@ -622,6 +622,153 @@ html, body {
     background: #c0392b;
 }
 
+/* Ingest [+] button */
+#ingest-btn {
+    padding: 0.5rem;
+    background: transparent;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: background 0.2s, color 0.2s;
+}
+
+#ingest-btn:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+
+/* Ephemeral document badge above input */
+.ephemeral-badge {
+    max-width: 800px;
+    margin: 0 auto 0.4rem;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: color-mix(in srgb, var(--accent) 12%, var(--bg-secondary));
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    border-radius: 8px;
+    padding: 0.35rem 0.75rem;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.ephemeral-badge span {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ephemeral-badge span::before {
+    content: "📄 ";
+}
+
+#ephemeral-clear-btn {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 1.1rem;
+    line-height: 1;
+    padding: 0;
+    flex-shrink: 0;
+}
+
+#ephemeral-clear-btn:hover {
+    color: var(--text-primary);
+}
+
+/* Ingest modal tabs */
+.ingest-tabs {
+    display: flex;
+    gap: 0.25rem;
+    margin-bottom: 1rem;
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 0.5rem;
+}
+
+.ingest-tab {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 0.35rem 0.9rem;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    transition: background 0.15s, color 0.15s;
+}
+
+.ingest-tab:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+
+.ingest-tab.active {
+    background: var(--bg-tertiary);
+    color: var(--accent);
+    font-weight: 500;
+}
+
+/* Ingest panels */
+.ingest-panel { width: 100%; }
+.ingest-panel.hidden { display: none; }
+
+/* File drop area */
+.file-drop-area {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    border: 2px dashed var(--border-color);
+    border-radius: 10px;
+    padding: 1.5rem 1rem;
+    cursor: pointer;
+    text-align: center;
+    transition: border-color 0.2s, background 0.2s;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.file-drop-area:hover,
+.file-drop-area.drag-over {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.file-drop-area input[type="file"] {
+    display: none;
+}
+
+/* Ingest status message */
+.ingest-status {
+    margin-top: 0.75rem;
+    padding: 0.6rem 0.8rem;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    line-height: 1.4;
+}
+
+.ingest-status.loading {
+    background: color-mix(in srgb, var(--accent) 10%, var(--bg-secondary));
+    color: var(--text-secondary);
+}
+
+.ingest-status.success {
+    background: color-mix(in srgb, #2ea043 15%, var(--bg-secondary));
+    color: #3fb950;
+}
+
+.ingest-status.error {
+    background: color-mix(in srgb, var(--error) 15%, var(--bg-secondary));
+    color: var(--error);
+}
+
 /* Typing indicator — three bouncing dots before first token */
 .typing-indicator {
     display: flex;

@@ -16,7 +16,7 @@ At 3 AM each night, while you're asleep, it processes the day's conversations in
 
 Cloud AI assistants are stateless. Every conversation starts from zero. They don't remember what you told them last week, they can't learn your preferences over time, and every word you type trains someone else's model.
 
-3AM takes a different approach: a small local model (14B parameters) wrapped in a system that makes it punch above its weight. The model provides reasoning. Everything else — memory, research, tool creation, behavioral adaptation — is handled by the architecture around it. The result is a personal AI that gets better the longer you use it, without getting bigger.
+3AM takes a different approach: a local model wrapped in a system that makes it punch above its weight. The model provides reasoning. Everything else — memory, research, tool creation, behavioral adaptation — is handled by the architecture around it. The result is a personal AI that gets better the longer you use it, without getting bigger.
 
 ---
 
@@ -26,6 +26,8 @@ Cloud AI assistants are stateless. Every conversation starts from zero. They don
 Conversations are extracted into discrete facts, embedded, and organized using a physics-inspired clustering algorithm based on gravitational torque. The system automatically discovers natural topic boundaries — no manual thresholds. High-importance clusters get priority in context retrieval, so the model remembers what matters most.
 
 As memories are stored, the system builds a directed link graph between them — **memory lanes**. Semantically related memories get bidirectional lanes (similar concepts connect freely). When the research system learns something because of a user memory, a one-way causal lane is built from that user memory to the research finding — you can follow it forward, but there's no lane back. Retrieval uses Personalized PageRank through this graph: a query seeds the nearest memories, then activation spreads through their lanes to surface associated context that pure vector search would miss.
+
+Retrieval is hybrid: BM25 full-text search and vector similarity run in parallel and are merged with Reciprocal Rank Fusion, so exact keyword matches and semantic matches are both surfaced. The embedder is unloaded from RAM after writes and only reloaded when needed, keeping idle memory use low.
 
 ### Encryption at Rest
 All sensitive user data is encrypted using Fernet (AES-128-CBC + HMAC-SHA256). The key is derived from your login password via PBKDF2HMAC-SHA256 and lives only in memory — never written to disk, cleared on logout or server restart. Every field the model extracts about you (summaries, conversation excerpts, cluster themes, behavior profile, research notes, installed tools) is stored encrypted. Embedding vectors remain plaintext because they are required for vector similarity search and are not human-readable. Existing unencrypted data migrates transparently on re-write.
@@ -61,20 +63,22 @@ A live star-map shows your memory space — clusters as suns, individual memorie
 ## Architecture
 
 ```
-Browser (Vanilla JS)          FastAPI Server              Local LLM
+Browser / Telegram            FastAPI Server              Local LLM
 ┌──────────────────┐    ┌──────────────────────┐    ┌──────────────────┐
 │ Chat UI          │    │ WebSocket streaming  │    │ llama.cpp        │
-│ Memory star-map  │◄──►│ Decision Gate        │◄──►│ Qwen3-14B       │
-│ Tool manager     │    │ Memory retrieval     │    │ (or any model)   │
-│ Research panel   │    │ Experience logging   │    │ Vulkan/CUDA/CPU  │
-│ Analytics        │    │ Tool execution       │    └──────────────────┘
+│ Memory star-map  │◄──►│ Decision Gate        │◄──►│ (any GGUF model) │
+│ Tool manager     │    │ Memory retrieval     │    │ Vulkan/CUDA/RPC  │
+│ Research panel   │    │ Experience logging   │    └──────────────────┘
+│ Analytics        │    │ Tool execution       │
+│ Document ingest  │    │ Document ingestion   │
 └──────────────────┘    └──────────┬───────────┘
                                    │
                         ┌──────────▼───────────┐
                         │ SQLite + sqlite-vec  │
                         │ memory.db per user   │
                         │ Torque Clustering    │
-                        │ Memory Lanes     │
+                        │ Memory lanes (PPR)   │
+                        │ Hybrid FTS5 + vec    │
                         │ Experience log       │
                         │ Behavior profile     │
                         └──────────────────────┘
@@ -245,7 +249,7 @@ Swap models by changing the server URL. The system auto-detects whatever `/v1/mo
 
 3AM grew out of a simple question: can a small local model, wrapped in the right architecture, deliver a personal AI experience that rivals cloud services — without the cloud?
 
-The answer is: for one user's daily needs, mostly yes. The model weights are fixed at 14B parameters, but the effective intelligence of the *system* grows continuously through accumulated memory, learned behavior, self-created tools, and proactive research. Context is a multiplier on capability.
+The answer is: for one user's daily needs, mostly yes. The model weights are fixed, but the effective intelligence of the *system* grows continuously through accumulated memory, learned behavior, self-created tools, and proactive research. Context is a multiplier on capability.
 
 The memory system uses Torque Clustering, a physics-inspired algorithm that treats memories as particles with mass and discovers natural cluster boundaries through gravitational torque balance. Based on: Yang & Lin, "Autonomous clustering by fast find of mass and distance peaks," IEEE TPAMI, 2025.
 

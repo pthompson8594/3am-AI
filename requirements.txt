@@ -11,6 +11,9 @@ anyio>=4.2.0
 # Data validation
 pydantic>=2.5.0
 
+# File upload support (required for /api/ingest/document)
+python-multipart>=0.0.9
+
 # Password hashing (for production)
 # bcrypt>=4.1.0
 

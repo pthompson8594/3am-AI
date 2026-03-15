@@ -103,7 +103,7 @@ class App {
         });
         document.getElementById('ingest-file-input').addEventListener('change', (e) => {
             const f = e.target.files[0];
-            if (f) document.getElementById('file-drop-label').textContent = f.name;
+            if (f) this._setIngestFile(f.name);
         });
         const dropArea = document.getElementById('file-drop-area');
         dropArea.addEventListener('dragover', (e) => { e.preventDefault(); dropArea.classList.add('drag-over'); });
@@ -117,8 +117,11 @@ class App {
                 const dt = new DataTransfer();
                 dt.items.add(f);
                 document.getElementById('ingest-file-input').files = dt.files;
-                document.getElementById('file-drop-label').textContent = f.name;
+                this._setIngestFile(f.name);
             }
+        });
+        document.getElementById('ingest-persist-toggle').addEventListener('change', (e) => {
+            this._updateIngestMode(e.target.checked);
         });
 
         // Ephemeral badge clear button
@@ -249,6 +252,26 @@ class App {
                         <pre class="tool-output-full hidden">${this.escapeHtml(data.output)}</pre>
                     </div>`;
                 state.contentDiv.innerHTML = state.toolOutputsHtml + '<span class="streaming-cursor"></span>';
+                this._scrollIfAtBottom(state.messagesContainer);
+                break;
+            }
+
+            case 'thinking': {
+                if (!state) break;
+                const thinkId = `think-${Date.now()}`;
+                const thinkPreview = data.content.replace(/\n/g, ' ').substring(0, 80) + (data.content.length > 80 ? '…' : '');
+                state.toolOutputsHtml += `
+                    <div class="tool-section think-section" id="${thinkId}">
+                        <div class="tool-header" onclick="app.toggleToolOutput('${thinkId}')">
+                            <span class="tool-toggle">▶</span>
+                            <span class="tool-name think-label">💭 Reasoning</span>
+                            <span class="tool-preview">${this.escapeHtml(thinkPreview)}</span>
+                        </div>
+                        <pre class="tool-output-full hidden">${this.escapeHtml(data.content)}</pre>
+                    </div>`;
+                state.contentDiv.innerHTML = state.toolOutputsHtml +
+                    this.formatMessage(state.fullResponse) +
+                    '<span class="streaming-cursor"></span>';
                 this._scrollIfAtBottom(state.messagesContainer);
                 break;
             }
@@ -1210,16 +1233,35 @@ class App {
 
     // --- Document Ingestion ---
 
+    _setIngestFile(name) {
+        document.getElementById('file-drop-label').textContent = name;
+        document.getElementById('file-drop-area').classList.add('has-file');
+    }
+
+    _updateIngestMode(persist) {
+        const btn = document.getElementById('ingest-submit-btn');
+        const modal = document.querySelector('#ingest-modal .modal-content');
+        btn.textContent = persist ? 'Extract & Learn' : 'Add to conversation';
+        modal.classList.toggle('learn-mode', persist);
+    }
+
     openIngestModal() {
         // Reset state
         document.getElementById('ingest-file-input').value = '';
         document.getElementById('file-drop-label').textContent = 'Click to select or drag a file here';
+        document.getElementById('file-drop-area').classList.remove('has-file');
         document.getElementById('ingest-url-input').value = '';
         document.getElementById('ingest-persist-toggle').checked = false;
         const status = document.getElementById('ingest-status');
         status.className = 'ingest-status hidden';
         status.textContent = '';
         document.getElementById('ingest-submit-btn').disabled = false;
+        const pb = document.getElementById('ingest-progress-bar');
+        pb.className = 'ingest-progress-bar';
+        pb.style.width = '0%';
+        pb.style.background = '';
+        document.getElementById('ingest-progress').classList.add('hidden');
+        this._updateIngestMode(false);
         // Default to file tab
         this.handleIngestTabSwitch('file');
         document.getElementById('ingest-modal').classList.remove('hidden');
@@ -1256,6 +1298,12 @@ class App {
             : 'Loading document into session context…';
         status.classList.remove('hidden');
 
+        // Show indeterminate progress bar
+        const progress = document.getElementById('ingest-progress');
+        const progressBar = document.getElementById('ingest-progress-bar');
+        progressBar.className = 'ingest-progress-bar indeterminate';
+        progress.classList.remove('hidden');
+
         const formData = new FormData();
         if (hasFile) formData.append('file', fileInput.files[0]);
         if (hasUrl)  formData.append('url', urlInput);
@@ -1266,21 +1314,60 @@ class App {
                 method: 'POST',
                 body: formData,
             });
-            const data = await resp.json();
-            if (!resp.ok) throw new Error(data.detail || 'Ingestion failed');
 
-            status.className = 'ingest-status success';
-            status.textContent = data.message;
-
-            if (data.mode === 'ephemeral') {
-                const badge = document.getElementById('ephemeral-badge');
-                document.getElementById('ephemeral-badge-name').textContent = data.doc_name;
-                badge.classList.remove('hidden');
+            if (!resp.ok) {
+                const raw = await resp.text();
+                let msg = 'Ingestion failed';
+                try { msg = JSON.parse(raw).detail || msg; } catch {}
+                throw new Error(msg);
             }
 
-            // Auto-close after a moment on success
-            setTimeout(() => this.closeModals(), 1800);
+            // Read SSE stream
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buf = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buf += decoder.decode(value, { stream: true });
+
+                // Process all complete lines in buffer
+                const lines = buf.split('\n');
+                buf = lines.pop() ?? '';
+
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    let evt;
+                    try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+
+                    if (evt.status === 'working') {
+                        status.textContent = evt.message;
+
+                    } else if (evt.status === 'complete') {
+                        progressBar.className = 'ingest-progress-bar';
+                        progressBar.style.width = '100%';
+                        progressBar.style.background = '#3fb950';
+                        status.className = 'ingest-status success';
+                        status.textContent = evt.message;
+
+                        if (evt.mode === 'ephemeral') {
+                            const badge = document.getElementById('ephemeral-badge');
+                            document.getElementById('ephemeral-badge-name').textContent = evt.doc_name;
+                            badge.classList.remove('hidden');
+                        }
+
+                        setTimeout(() => this.closeModals(), 1800);
+
+                    } else if (evt.status === 'error') {
+                        throw new Error(evt.message);
+                    }
+                }
+            }
         } catch (err) {
+            progressBar.className = 'ingest-progress-bar';
+            progressBar.style.width = '100%';
+            progressBar.style.background = 'var(--error)';
             status.className = 'ingest-status error';
             status.textContent = err.message;
             submitBtn.disabled = false;
@@ -1945,4 +2032,27 @@ class App {
 document.addEventListener('DOMContentLoaded', () => {
     window.app = new App();
     window._closeAllPanels = () => window.app._closeAllPanels();
+
+    // LLM status LED — poll every 10s, only update DOM if status changed
+    let _llmStatus = null;
+    async function pollLlmHealth() {
+        let next;
+        try {
+            const resp = await fetch('/api/llm/health');
+            const data = await resp.json();
+            next = data.status === 'ok' ? 'ok' : 'error';
+        } catch {
+            next = 'error';
+        }
+        if (next !== _llmStatus) {
+            _llmStatus = next;
+            const led = document.getElementById('llm-status-led');
+            if (led) {
+                led.className = `llm-status-led ${next}`;
+                led.title = next === 'ok' ? 'LLM server connected' : 'LLM server unreachable';
+            }
+        }
+    }
+    pollLlmHealth();
+    setInterval(pollLlmHealth, 10000);
 });

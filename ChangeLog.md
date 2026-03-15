@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.3.0 (2026-03-15)
+
+### Agentic multi-step tool loop
+- `chat_stream` now loops up to 10 times; each iteration calls the new `_stream_one_turn` helper
+- The model can chain tool calls across steps — search, reason on the result, call another tool, then reply — instead of stopping after one round
+- `_stream_one_turn` centralises all streaming logic (token collection, think-block detection, tool dispatch) to avoid duplication in the outer loop
+
+### Think block UI
+- `_stream_one_turn` detects `<think>...</think>` tokens and emits them as `{"type": "thinking"}` SSE events
+- Frontend renders them as collapsible "💭 Reasoning" sections; main response text is unaffected
+
+### `cache_prompt: false` on all LLM requests
+- Prevents llama-server from writing KV-cache checkpoints (~60 MB each) that were causing OOM kills
+- Freed RAM can be redirected to a larger `--ctx-size`
+
+### Immediate cluster assignment
+- After storing a new conversation turn, `assign_unclustered_memories` is called immediately via `run_in_executor`
+- New facts are cluster-assigned within seconds instead of waiting for the 3 AM cycle
+- Skipped automatically if `_clustering_in_progress` is set
+
+### LLM status LED
+- Small dot in the chat header polls `GET /api/llm/health` every 10 seconds
+- Green = llama-server reachable; red = not reachable; DOM only updated on status change
+
+### Other
+- `max_tokens` increased from 2000 to 8000 for multi-step and reasoning-heavy responses
+- System prompt updated: removed inline JSON tool-call instructions (model uses native API tool calling); added explicit multi-step rule; `/no_think` retained
+- `llm_core.py` deleted — the CLI path was dead code
+- Added `static/sw.js` no-op stub to suppress browser 404 probes for service workers
+
 ## 1.2.0
 
 ### Document Ingestion

@@ -22,6 +22,15 @@ Cloud AI assistants are stateless. Every conversation starts from zero. They don
 
 ## Key Features
 
+### Agentic Multi-Step Tool Loop
+The assistant can chain tool calls across multiple steps within a single response — up to 10 iterations. If a web search returns something that warrants a follow-up, or a tool result needs interpretation before answering, the model continues reasoning and calling tools until it has what it needs. Previously it was limited to one round of tool calls per message.
+
+### Think Block UI
+When the model emits `<think>...</think>` tokens (extended reasoning), those are surfaced as collapsible "Reasoning" sections in the chat — separate from the main response. Click to expand and inspect the model's chain of thought.
+
+### LLM Status LED
+A small dot in the chat header shows whether llama-server is reachable. Green means the LLM is responding; red means it isn't. Polls every 10 seconds and only updates the DOM on status change.
+
 ### Persistent Memory with Torque Clustering and Memory Lanes
 Conversations are extracted into discrete facts, embedded, and organized using a physics-inspired clustering algorithm based on gravitational torque. The system automatically discovers natural topic boundaries — no manual thresholds. High-importance clusters get priority in context retrieval, so the model remembers what matters most.
 
@@ -149,9 +158,9 @@ The `install.sh` script will ask about RPC workers and bake the addresses into t
 1. Your message arrives
 2. Memory retrieval: vec search finds the 5 nearest memories, Personalized PageRank spreads through the lane graph to surface associated context
 3. Decision Gate evaluates: answer / search / ask for clarification
-4. Response is generated with confidence scoring (logprobs)
+4. Response is generated — the model can chain tool calls across multiple steps before replying; `<think>` tokens are routed as collapsible Reasoning sections
 5. Conversation is queued for overnight processing
-6. Priority-5 facts (identity info) are stored immediately, with semantic lanes built to related memories
+6. Priority-5 facts (identity info) are stored immediately, with semantic lanes built to related memories; new facts are cluster-assigned right away (no wait for 3 AM)
 
 **At 3 AM:**
 1. Pending conversations are grouped by topic

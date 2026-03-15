@@ -15,6 +15,15 @@ import json
 import os
 import time
 import uuid
+import warnings
+
+# asyncio.iscoroutinefunction was deprecated in Python 3.12 and is called
+# internally by starlette — suppress until starlette drops it upstream.
+warnings.filterwarnings(
+    "ignore",
+    message=".*iscoroutinefunction.*",
+    category=DeprecationWarning,
+)
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -117,27 +126,21 @@ async def _push_to_ws(user_id: str, payload: dict):
 # System prompt
 SYSTEM_PROMPT_BASE = """You are a helpful assistant with access to tools.
 
-YOUR TOOLS:
-- web_search: Search the web for information
+TOOLS AVAILABLE:
+- web_search: Search the web for current information
 - execute_command: Run shell commands
 - create_file: Create or write files
 - read_file: Read local files
-- read_url: Fetch webpage content
-- clipboard: Read/write clipboard
-- system_info: Get system stats
-
-HOW TO CALL TOOLS:
-Output JSON in this format:
-{"name": "tool_name", "arguments": {"arg1": "value1"}}
-
-Examples:
-- {"name": "web_search", "arguments": {"query": "weather today"}}
-- {"name": "execute_command", "arguments": {"command": "ls -la"}}
+- read_url: Fetch full webpage content from a URL
+- clipboard: Read/write the system clipboard
+- system_info: Get system stats (CPU, memory, disk, etc.)
 
 RULES:
-1. Use web_search when you're not certain about current information.
-2. Be concise in responses.
-3. Trust tool results over your assumptions.
+1. Use web_search when you need current or uncertain information — don't guess.
+2. You can call tools multiple times in sequence. Use as many steps as needed to fully complete a task.
+3. After getting tool results, reason about them before deciding whether to call more tools or give a final answer.
+4. Trust tool results over your training knowledge for anything time-sensitive.
+5. Be concise in final answers.
 /no_think"""
 
 
@@ -591,7 +594,8 @@ class UserLLMCore:
         stream_request = {
             "model": self.model,
             "messages": request_messages,
-            "max_tokens": 2000,
+            "max_tokens": 8000,
+            "cache_prompt": False,
             "tools": active_tools,
             "stream": True,
         }
@@ -601,90 +605,50 @@ class UserLLMCore:
         if gate_forced_search:
             stream_request["tool_choice"] = {"type": "function", "function": {"name": "web_search"}}
 
-        try:
-            async with self.client.stream(
-                "POST",
-                f"{self.llm_url}/v1/chat/completions",
-                json=stream_request,
-            ) as resp:
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    data = line[6:]
-                    if data == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data)
-                        choice_chunk = chunk.get("choices", [{}])[0]
-                        delta = choice_chunk.get("delta", {})
+        # Initial turn
+        async for event in self._stream_one_turn(stream_request):
+            if isinstance(event, dict):
+                if event.get("error"):
+                    return
+                content = event["content"]
+                tool_calls = event["tool_calls"]
+                logprob_values = event["logprob_values"]
+                token_count = event["token_count"]
+                generation_start = event["generation_start"]
+            else:
+                yield event
 
-                        # Handle content tokens
-                        token = delta.get("content", "")
-                        if token:
-                            if generation_start is None:
-                                generation_start = time.time()
-                            token_count += 1
-                            content += token
-                            yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
+        # Agentic tool loop — keeps running until the model stops calling tools
+        MAX_TOOL_ITERATIONS = 10
+        for iteration in range(MAX_TOOL_ITERATIONS):
+            if not tool_calls:
+                break
 
-                        # MK13: collect logprob for each token
-                        chunk_logprobs = choice_chunk.get("logprobs", {})
-                        if chunk_logprobs and isinstance(chunk_logprobs, dict):
-                            for lp_entry in (chunk_logprobs.get("content") or []):
-                                lp = lp_entry.get("logprob")
-                                if lp is not None:
-                                    logprob_values.append(float(lp))
+            names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
+            print(f"[Agent] step {iteration + 1}: {names}")
 
-                        # Handle tool calls
-                        tc_delta = delta.get("tool_calls", [])
-                        for tc in tc_delta:
-                            idx = tc.get("index", 0)
-                            while len(tool_calls) <= idx:
-                                tool_calls.append({"id": "", "function": {"name": "", "arguments": ""}})
-
-                            if tc.get("id"):
-                                tool_calls[idx]["id"] = tc["id"]
-                            if tc.get("function", {}).get("name"):
-                                tool_calls[idx]["function"]["name"] = tc["function"]["name"]
-                            if tc.get("function", {}).get("arguments"):
-                                tool_calls[idx]["function"]["arguments"] += tc["function"]["arguments"]
-                    except json.JSONDecodeError:
-                        continue
-        except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
-            return
-        
-        # Filter out empty/incomplete tool calls
-        tool_calls = [tc for tc in tool_calls if tc.get("function", {}).get("name")]
-        
-        # Check for inline tool calls
-        if not tool_calls and content:
-            remaining, inline_calls = parse_inline_tool_calls(content)
-            if inline_calls:
-                tool_calls = inline_calls
-                content = remaining
-        
-        # Handle tool calls
-        if tool_calls:
-            for tc in tool_calls:
+            # Execute all tool calls in this step
+            normalized_calls = []
+            tool_results = []
+            for i, tc in enumerate(tool_calls):
                 func = tc.get("function", {})
                 tool_name = func.get("name", "")
-                tool_call_id = tc.get("id", "call_1")
-                
+                tool_call_id = tc.get("id") or f"call_{iteration}_{i}"
+
                 try:
                     args = json.loads(func.get("arguments", "{}"))
                 except json.JSONDecodeError:
-                    continue
-                
-                yield f"data: {json.dumps({'type': 'tool_call', 'name': tool_name, 'args': args})}\n\n"
-                
-                # Signal tool execution status
-                yield f"data: {json.dumps({'type': 'status', 'status': 'tool'})}\n\n"
-                
-                # Execute tool
-                tool_output = await self.tools.execute(tool_name, args)
+                    args = {}
 
-                # Log tool errors to error journal for self-improvement analysis
+                yield f"data: {json.dumps({'type': 'tool_call', 'name': tool_name, 'args': args})}\n\n"
+                yield f"data: {json.dumps({'type': 'status', 'status': 'tool'})}\n\n"
+
+                try:
+                    tool_output = await self.tools.execute(tool_name, args)
+                except Exception as tool_exc:
+                    tool_output = f"[Error executing {tool_name}: {tool_exc}]"
+                    print(f"[Agent] tool exception — {tool_name}: {tool_exc}")
+
                 if tool_output.startswith("[Error"):
                     self.introspection.error_journal.log_error(
                         tool_name=tool_name,
@@ -693,81 +657,59 @@ class UserLLMCore:
                         context=message[:200],
                     )
 
-                # Check if this requires user approval (file operations)
                 if tool_output.startswith("[PENDING_APPROVAL:") and self.tools.pending_approval:
                     pending = self.tools.pending_approval
                     yield f"data: {json.dumps({'type': 'approval_required', 'approval': pending.to_dict()})}\n\n"
-                    # Return early - frontend will handle approval and call /api/approve endpoint
                     return
-                
+
                 yield f"data: {json.dumps({'type': 'tool_output', 'name': tool_name, 'output': tool_output[:2000]})}\n\n"
-                
-                # Add to messages for follow-up
-                request_messages.append({
-                    "role": "assistant",
-                    "content": content or None,
-                    "tool_calls": [{
-                        "id": tool_call_id,
-                        "type": "function",
-                        "function": {"name": tool_name, "arguments": func.get("arguments", "{}")}
-                    }]
+
+                normalized_calls.append({
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {"name": tool_name, "arguments": func.get("arguments", "{}")},
                 })
+                tool_results.append((tool_call_id, tool_output))
+
+            # Append assistant message with all tool calls, then all results
+            request_messages.append({
+                "role": "assistant",
+                "content": content or None,
+                "tool_calls": normalized_calls,
+            })
+            for tool_call_id, tool_output in tool_results:
                 request_messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
-                    "content": tool_output
+                    "content": tool_output,
                 })
-            
-            # Signal thinking status for follow-up response
+
             yield f"data: {json.dumps({'type': 'status', 'status': 'thinking'})}\n\n"
-            
-            # Get follow-up response
-            try:
-                followup_tools = self.tools.get_active_tools()
-                followup_request = {
-                    "model": self.model,
-                    "messages": request_messages,
-                    "max_tokens": 2000,
-                    "tools": followup_tools,
-                    "stream": True,
-                }
-                # MK13: llama-server rejects logprobs + tools + stream simultaneously
-                if not followup_tools:
-                    followup_request["logprobs"] = True
-                async with self.client.stream(
-                    "POST",
-                    f"{self.llm_url}/v1/chat/completions",
-                    json=followup_request,
-                ) as resp:
-                    content = ""
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        data = line[6:]
-                        if data == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(data)
-                            choice_chunk = chunk.get("choices", [{}])[0]
-                            token = choice_chunk.get("delta", {}).get("content", "")
-                            if token:
-                                if generation_start is None:
-                                    generation_start = time.time()
-                                token_count += 1
-                                content += token
-                                yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
-                            # MK13: collect logprobs from follow-up too
-                            chunk_logprobs = choice_chunk.get("logprobs", {})
-                            if chunk_logprobs and isinstance(chunk_logprobs, dict):
-                                for lp_entry in (chunk_logprobs.get("content") or []):
-                                    lp = lp_entry.get("logprob")
-                                    if lp is not None:
-                                        logprob_values.append(float(lp))
-                        except json.JSONDecodeError:
-                            continue
-            except Exception as e:
-                yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
-                return
+
+            followup_tools = self.tools.get_active_tools()
+            followup_request = {
+                "model": self.model,
+                "messages": request_messages,
+                "max_tokens": 8000,
+                "cache_prompt": False,
+                "tools": followup_tools,
+                "stream": True,
+            }
+            if not followup_tools:
+                followup_request["logprobs"] = True
+
+            async for event in self._stream_one_turn(followup_request):
+                if isinstance(event, dict):
+                    if event.get("error"):
+                        return
+                    content = event["content"]
+                    tool_calls = event["tool_calls"]
+                    logprob_values.extend(event["logprob_values"])
+                    token_count += event["token_count"]
+                    if generation_start is None:
+                        generation_start = event["generation_start"]
+                else:
+                    yield event
         
         # MK13: compute response confidence from accumulated logprobs
         import math as _math
@@ -818,6 +760,112 @@ class UserLLMCore:
 
         yield f"data: {json.dumps({'type': 'done', 'stats': stats, 'message_id': message_id})}\n\n"
     
+    async def _stream_one_turn(self, request: dict):
+        """
+        Async generator for one LLM streaming turn.
+        Yields SSE strings for content tokens, then a final dict:
+          {'_meta': True, 'content': str, 'tool_calls': list,
+           'logprob_values': list, 'token_count': int, 'generation_start': float|None}
+        On connection error yields an SSE error string then {'_meta': True, 'error': True}.
+        """
+        content = ""
+        tool_calls = []
+        logprob_values = []
+        token_count = 0
+        generation_start = None
+        in_think = False
+        think_buffer = ""
+
+        try:
+            async with self.client.stream(
+                "POST",
+                f"{self.llm_url}/v1/chat/completions",
+                json=request,
+            ) as resp:
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data = line[6:]
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                        choice_chunk = chunk.get("choices", [{}])[0]
+                        delta = choice_chunk.get("delta", {})
+
+                        token = delta.get("content", "")
+                        if token:
+                            if not in_think and "<think>" in token:
+                                before, _, after = token.partition("<think>")
+                                if before:
+                                    if generation_start is None:
+                                        generation_start = time.time()
+                                    token_count += 1
+                                    content += before
+                                    yield f"data: {json.dumps({'type': 'token', 'content': before})}\n\n"
+                                in_think = True
+                                think_buffer = after
+                            elif in_think and "</think>" in token:
+                                think_part, _, after = token.partition("</think>")
+                                think_buffer += think_part
+                                yield f"data: {json.dumps({'type': 'thinking', 'content': think_buffer})}\n\n"
+                                in_think = False
+                                think_buffer = ""
+                                if after:
+                                    if generation_start is None:
+                                        generation_start = time.time()
+                                    token_count += 1
+                                    content += after
+                                    yield f"data: {json.dumps({'type': 'token', 'content': after})}\n\n"
+                            elif in_think:
+                                think_buffer += token
+                            else:
+                                if generation_start is None:
+                                    generation_start = time.time()
+                                token_count += 1
+                                content += token
+                                yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
+
+                        chunk_logprobs = choice_chunk.get("logprobs", {})
+                        if chunk_logprobs and isinstance(chunk_logprobs, dict):
+                            for lp_entry in (chunk_logprobs.get("content") or []):
+                                lp = lp_entry.get("logprob")
+                                if lp is not None:
+                                    logprob_values.append(float(lp))
+
+                        for tc in delta.get("tool_calls", []):
+                            idx = tc.get("index", 0)
+                            while len(tool_calls) <= idx:
+                                tool_calls.append({"id": "", "function": {"name": "", "arguments": ""}})
+                            if tc.get("id"):
+                                tool_calls[idx]["id"] = tc["id"]
+                            if tc.get("function", {}).get("name"):
+                                tool_calls[idx]["function"]["name"] = tc["function"]["name"]
+                            if tc.get("function", {}).get("arguments"):
+                                tool_calls[idx]["function"]["arguments"] += tc["function"]["arguments"]
+                    except json.JSONDecodeError:
+                        continue
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            yield {"_meta": True, "error": True}
+            return
+
+        tool_calls = [tc for tc in tool_calls if tc.get("function", {}).get("name")]
+        if not tool_calls and content:
+            remaining, inline = parse_inline_tool_calls(content)
+            if inline:
+                tool_calls = inline
+                content = remaining
+
+        yield {
+            "_meta": True,
+            "content": content,
+            "tool_calls": tool_calls,
+            "logprob_values": logprob_values,
+            "token_count": token_count,
+            "generation_start": generation_start,
+        }
+
     async def _store_memory(self, user_message: str, assistant_response: str):
         """Store conversation in memory system."""
         try:
@@ -827,6 +875,13 @@ class UserLLMCore:
                 self.client,
                 on_status=lambda x: None
             )
+            # Assign any new facts to clusters immediately so they're retrievable
+            # without waiting for the nightly introspection run.
+            # Skip if a full recluster is already in progress to avoid racing.
+            if self.memory.needs_reclustering() and not self.memory._clustering_in_progress:
+                await asyncio.get_event_loop().run_in_executor(
+                    None, self.memory.assign_unclustered_memories
+                )
         except Exception as e:
             print(f"[Memory] Error storing memory: {e}")
     
@@ -1788,17 +1843,13 @@ async def ingest_document_endpoint(
     user: User = Depends(get_current_user),
 ):
     """
-    Ingest a document into the assistant.
-
-    persist=False (default): raw text is stored as ephemeral context, injected
-      into every system prompt for this session. Cleared by DELETE /api/ingest/ephemeral.
-
-    persist=True: LLM extracts atomic propositions which are stored permanently
-      in the memory system with sequential and hierarchical PPR lanes.
+    Ingest a document. Returns an SSE stream so long LLM calls don't hit
+    proxy timeouts. Events: {status: working|complete|error, message, ...}
     """
     core = get_user_core(user)
+    print(f"[Ingest] Request from {user.username}: persist={persist}, file={file.filename if file else None}")
 
-    # --- Obtain raw text ---
+    # --- Obtain raw text (fast — do before streaming) ---
     doc_name = "document"
     text = ""
 
@@ -1828,47 +1879,68 @@ async def ingest_document_endpoint(
     if not text.strip():
         raise HTTPException(status_code=422, detail="Document appears to be empty")
 
-    # --- Ephemeral mode: inject raw text into session context ---
+    import json as _json
+
+    def _evt(data: dict) -> str:
+        return f"data: {_json.dumps(data)}\n\n"
+
+    # --- Ephemeral mode ---
     if not persist:
-        # Truncate to a reasonable size for direct context injection
         max_ctx = 80_000
         injected = text[:max_ctx]
         if len(text) > max_ctx:
             injected += f"\n\n[Truncated — showing first {max_ctx} characters]"
         core._ephemeral_context = f"## {doc_name}\n\n{injected}"
         char_count = len(injected)
-        return {
-            "mode": "ephemeral",
-            "doc_name": doc_name,
-            "chars": char_count,
-            "message": f"Document loaded into session context ({char_count:,} chars). It will not be stored in memory.",
-        }
 
-    # --- Persistent mode: LLM proposition extraction + memory storage ---
-    try:
-        result = await ingest_document(text, doc_name, core.client, core.llm_url, core.model)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Ingestion LLM call failed: {exc}")
+        async def _ephemeral():
+            yield _evt({"status": "complete", "mode": "ephemeral", "doc_name": doc_name,
+                        "chars": char_count,
+                        "message": f"Document loaded into session context ({char_count:,} chars). It will not be stored in memory."})
 
-    try:
-        stored = await core.memory.store_document(result)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to store document: {exc}")
+        return StreamingResponse(_ephemeral(), media_type="text/event-stream",
+                                 headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"})
 
-    # Invalidate viz cache so new nodes appear immediately
-    core.memory._viz_cache = None
+    # --- Persistent mode: stream keepalives while LLM works ---
+    async def _persistent():
+        # Kick off LLM extraction as a concurrent task
+        task = asyncio.create_task(
+            ingest_document(text, doc_name, core.client, core.llm_url, core.model)
+        )
 
-    return {
-        "mode": "persistent",
-        "doc_name": doc_name,
-        "doc_summary": result.get("doc_summary", ""),
-        "sections": stored["sections"],
-        "propositions": stored["propositions"],
-        "message": (
-            f"Stored {stored['propositions']} propositions across "
-            f"{stored['sections']} sections from \"{doc_name}\"."
-        ),
-    }
+        tick = 0
+        while not task.done():
+            yield _evt({"status": "working", "message": "Extracting propositions with LLM…", "tick": tick})
+            tick += 1
+            await asyncio.sleep(3)
+
+        try:
+            result = task.result()
+        except BaseException as exc:
+            msg = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+            print(f"[Ingest] LLM extraction failed: {msg}", flush=True)
+            yield _evt({"status": "error", "message": f"LLM extraction failed: {msg}"})
+            return
+
+        yield _evt({"status": "working", "message": "Storing to memory…", "tick": tick})
+
+        try:
+            stored = await core.memory.store_document(result)
+        except Exception as exc:
+            print(f"[Ingest] Memory store failed: {exc}")
+            yield _evt({"status": "error", "message": f"Failed to store document: {exc}"})
+            return
+
+        core.memory._viz_cache = None
+        prop_count = stored["propositions"]
+        sec_count = stored["sections"]
+        print(f"[Ingest] Stored {prop_count} propositions in {sec_count} sections from '{doc_name}'")
+        yield _evt({"status": "complete", "mode": "persistent", "doc_name": doc_name,
+                    "propositions": prop_count, "sections": sec_count,
+                    "message": f"Stored {prop_count} propositions across {sec_count} sections from \"{doc_name}\"."})
+
+    return StreamingResponse(_persistent(), media_type="text/event-stream",
+                             headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"})
 
 
 @app.delete("/api/ingest/ephemeral")
@@ -1877,6 +1949,19 @@ async def clear_ephemeral_context(user: User = Depends(get_current_user)):
     core = get_user_core(user)
     core._ephemeral_context = ""
     return {"ok": True}
+
+
+@app.get("/api/llm/health")
+async def llm_health(user: User = Depends(get_current_user)):
+    """Check whether the LLM backend is reachable."""
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(f"{LLM_URL}/health")
+        if resp.status_code == 200:
+            return {"status": "ok"}
+        return {"status": "error"}
+    except Exception:
+        return {"status": "error"}
 
 
 # --- Static Files & Frontend ---

@@ -802,6 +802,8 @@ class MemorySystem:
         sections = ingestion_result.get("sections", [])
 
         user_msg = f"[Ingested document: {doc_name}]"
+        # Keep embedder loaded for the full batch — one load instead of N load/unload cycles
+        self._suppress_embedder_unload = True
 
         # Store document-level summary
         doc_id = None
@@ -847,6 +849,9 @@ class MemorySystem:
             elif prop_ids and doc_id and not section_id:
                 # No section summary — link props directly to doc
                 self._build_hierarchical_links(prop_ids, doc_id, doc_id)
+
+        self._suppress_embedder_unload = False
+        self._maybe_unload_embedder()
 
         return {
             "doc_name": doc_name,
@@ -1191,7 +1196,10 @@ class MemorySystem:
         """Unload the embedding model after a write if configured to do so.
         Controlled by config key 'embedder_unload_after_write' (default True).
         Keeps idle RAM ~280MB; write spike is ~540MB for ~1-2s only.
+        Suppressed during bulk operations (e.g. store_document) via _suppress_embedder_unload.
         """
+        if getattr(self, "_suppress_embedder_unload", False):
+            return
         try:
             config_file = DEFAULT_CONFIG_DIR / "config.json"
             if config_file.exists():

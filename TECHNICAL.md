@@ -2,7 +2,45 @@
 
 Web-based LLM assistant with **Torque Clustering memory system, SQLite + sqlite-vec storage, multi-user support, ChatGPT-like interface, self-created custom tools, decision gate, logprobs-based confidence scoring, feedback-driven behavior adaptation, Fernet field-level encryption at rest, and document ingestion with PPR-linked proposition storage**.
 
-## What's New in v1.2.0 (current)
+## What's New in v1.3.0 (current)
+
+### Agentic Multi-Step Tool Loop
+
+`chat_stream` in `server.py` now loops up to 10 times, each iteration calling `_stream_one_turn`. A turn returns either a finished response or a list of tool calls; if tool calls are returned, they are executed and the results are appended to the message list before the next iteration. Previously the handler did one round of tool calls and stopped.
+
+`_stream_one_turn` is a new helper that owns all streaming logic for a single LLM request — collects tokens, detects think blocks, dispatches tool calls — so the agentic outer loop doesn't duplicate that logic.
+
+### Think Block Handling
+
+`_stream_one_turn` scans the token stream for `<think>` / `</think>` delimiters. Tokens inside a think block are emitted as `{"type": "thinking", "content": "..."}` SSE events instead of `{"type": "token"}`. The frontend renders them as collapsible "💭 Reasoning" sections using the same pattern as tool outputs.
+
+### `cache_prompt: false` on All LLM Requests
+
+Every request to llama-server now sends `"cache_prompt": false`. This stops llama-server from writing KV-cache checkpoints (~60 MB each) to disk, which was triggering OOM kills on memory-constrained machines. The freed RAM can be given back to `--ctx-size` for a larger context window.
+
+### Immediate Cluster Assignment on Memory Write
+
+After `_store_memory` writes a new conversation turn, it immediately calls `assign_unclustered_memories` via `run_in_executor`. New facts are cluster-assigned within seconds of being stored rather than waiting for the 3 AM cycle. The call is guarded by `_clustering_in_progress` so it skips silently if a full recluster is already running.
+
+### LLM Status LED
+
+A small dot in the chat header polls `GET /api/llm/health` every 10 seconds. Green if llama-server responds, red if not. The DOM is only updated on status change to avoid unnecessary repaints.
+
+### `max_tokens` Increased: 2000 → 8000
+
+Raised to give the model enough headroom for multi-step responses and extended reasoning output.
+
+### `llm_core.py` Removed
+
+The CLI entry point was dead code (not imported anywhere). Deleted to reduce clutter.
+
+### `static/sw.js` Added (no-op)
+
+An empty service-worker stub at `/sw.js` stops browsers from generating 404 errors when they probe for a service worker.
+
+---
+
+## What's New in v1.2.0
 
 ### Document Ingestion
 
@@ -383,6 +421,7 @@ Pattern-based import block stops dangerous patterns including: `import subproces
 - **Typing indicator** — three-dot bounce animation shown before the first token arrives
 - **Server push** — background tasks (research, self-improvement, introspection) send status toasts to the browser in real time via `loop.create_task(ws.send_json(...))`
 - Exponential backoff reconnect (1 s → 30 s max); code 4001 (unauthorized) suppresses reconnect
+- **`thinking` event type** — `{"type": "thinking", "content": "..."}` frames carry model reasoning tokens (inside `<think>...</think>`); rendered as collapsible sections, not mixed into the response text
 
 ### Memory Management
 - **Export** (`GET /api/memory/export`) — downloads all memories, clusters, and user profile as a portable JSON file
@@ -531,8 +570,10 @@ pip install umap-learn
 │  │  - Messages           │  - Conversations  │  - Research     ││
 │  │  - Streaming          │  - Search         │  - Self-improve ││
 │  │  - Tool outputs       │  - Delete/rename  │  - Decision Gate││
-│  │  - 👍/👎 Feedback     │                   │  - Confidence   ││
-│  │  - Confidence badges  │                   │  - Feedback     ││
+│  │  - Think blocks       │                   │  - Confidence   ││
+│  │  - 👍/👎 Feedback     │                   │  - Feedback     ││
+│  │  - Confidence badges  │                   │                 ││
+│  │  - LLM status LED     │                   │                 ││
 │  └─────────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -541,10 +582,11 @@ pip install umap-learn
 ┌─────────────────────────────────────────────────────────────────┐
 │  Web Server (FastAPI)                                           │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │  Auth       │  │  Chat API   │  │  Scheduled Tasks        │  │
-│  │  - Login    │  │  - Stream   │  │  - 3 AM memory cycle    │  │
-│  │  - Register │  │  - History  │  │  - Hourly idle cycle    │  │
-│  │  - Sessions │  │  - Tools    │  │  - 3 AM: behavior upd   │  │
+│  │  Auth       │  │  Chat API          │  │  Scheduled Tasks        │  │
+│  │  - Login    │  │  - Stream          │  │  - 3 AM memory cycle    │  │
+│  │  - Register │  │  - Agentic loop    │  │  - Hourly idle cycle    │  │
+│  │  - Sessions │  │  - _stream_one_turn│  │  - 3 AM: behavior upd   │  │
+│  │             │  │  - History/Tools   │  │                         │  │
 │  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -725,7 +767,6 @@ curl -X POST "http://localhost:8000/api/introspection/trigger?force_recluster=tr
 | `auth.py` | User authentication |
 | `scheduler.py` | Scheduled introspection |
 | `data_security.py` | Fernet encryption: `DataEncryptor`, `derive_key_from_password`, `SecureUserData` |
-| `llm_core.py` | Core LLM logic (terminal interface, from MK7) |
 | `memory.py` | Memory system with SQLite + sqlite-vec and Torque Clustering (MK11) |
 | `introspection.py` | Introspection loop with Torque re-clustering + behavior profile update (MK13) |
 | `research.py` | Research system (from MK7) |
@@ -743,6 +784,7 @@ curl -X POST "http://localhost:8000/api/introspection/trigger?force_recluster=tr
 | `static/js/app.js` | Frontend JavaScript |
 | `static/js/memory-map.js` | Three.js 3D memory star-map (ES module, loads via importmap) |
 | `static/js/neural-visualizer.js` | Canvas brain-activity visualizer |
+| `static/sw.js` | No-op service worker stub (suppresses browser 404 probes) |
 
 ## Torque Clustering
 

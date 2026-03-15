@@ -741,6 +741,28 @@ html, body {
     background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
+.file-drop-area.has-file {
+    border-color: var(--accent);
+    border-style: solid;
+    background: color-mix(in srgb, var(--accent) 10%, var(--bg-secondary));
+    color: var(--text-primary);
+}
+
+.file-drop-area.has-file svg {
+    opacity: 1;
+    color: var(--accent);
+}
+
+/* Learn mode — tint modal header to signal persistent mode */
+.modal-content.learn-mode {
+    border-color: color-mix(in srgb, var(--accent) 50%, var(--border-color));
+}
+
+.modal-content.learn-mode .modal-header {
+    background: color-mix(in srgb, var(--accent) 10%, var(--bg-secondary));
+    border-bottom-color: color-mix(in srgb, var(--accent) 30%, var(--border-color));
+}
+
 .file-drop-area input[type="file"] {
     display: none;
 }
@@ -767,6 +789,35 @@ html, body {
 .ingest-status.error {
     background: color-mix(in srgb, var(--error) 15%, var(--bg-secondary));
     color: var(--error);
+}
+
+/* Ingest progress bar */
+.ingest-progress {
+    margin-top: 0.5rem;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--border-color);
+    overflow: hidden;
+}
+
+.ingest-progress.hidden { display: none; }
+
+.ingest-progress-bar {
+    height: 100%;
+    width: 0%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 0.4s ease;
+}
+
+.ingest-progress-bar.indeterminate {
+    width: 40%;
+    animation: ingest-slide 1.4s ease-in-out infinite;
+}
+
+@keyframes ingest-slide {
+    0%   { transform: translateX(-150%); }
+    100% { transform: translateX(350%); }
 }
 
 /* Typing indicator — three bouncing dots before first token */
@@ -1136,6 +1187,32 @@ html, body {
     color: var(--warning);
     font-size: 0.9rem;
     margin-bottom: 0.5rem;
+}
+
+/* Think block — same collapse pattern as tool sections, distinct colour */
+.think-section .tool-toggle,
+.think-section .think-label {
+    color: var(--accent);
+}
+
+/* LLM status LED */
+.llm-status-led {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+    background: var(--text-secondary);
+    transition: background 0.4s, box-shadow 0.4s;
+    align-self: center;
+}
+.llm-status-led.ok {
+    background: var(--success);
+    box-shadow: 0 0 6px var(--success);
+}
+.llm-status-led.error {
+    background: var(--error);
+    box-shadow: 0 0 5px var(--error);
 }
 
 /* Scrollbar */

@@ -1971,6 +1971,15 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
+@app.get("/sw.js")
+async def service_worker():
+    """Serve no-op service worker from root so browsers don't 404."""
+    sw_file = STATIC_DIR / "sw.js"
+    content = sw_file.read_text() if sw_file.exists() else "// no-op"
+    from fastapi.responses import Response
+    return Response(content=content, media_type="application/javascript")
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     """Serve the main page."""

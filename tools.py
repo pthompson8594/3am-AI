@@ -466,15 +466,19 @@ class ToolExecutor:
             return f"[PENDING_APPROVAL:{self.pending_approval.id}]"
         
         self.last_command = command
-        
+
         try:
-            result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                cwd=self.working_dir
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    command,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    cwd=self.working_dir,
+                ),
             )
             
             output = result.stdout

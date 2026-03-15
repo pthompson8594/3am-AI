@@ -507,6 +507,23 @@ class UserLLMCore:
 
         # Check for special commands first
         if self.commands.is_command(message):
+            cmd_name = message.strip().lstrip("?").split()[0].lower() if message.strip() else ""
+            LONG_RUNNING = {"reflect", "recluster", "analyze", "propose-tool", "approve-tool"}
+            if cmd_name in LONG_RUNNING:
+                # Fire in background — these can take 30s+ and would time out the WebSocket
+                user_id = self.user.id
+                async def _run_cmd():
+                    result = await self.commands.handle(message)
+                    if result.handled:
+                        await _push_to_ws(user_id, {
+                            "type": "server_push",
+                            "content": result.response,
+                            "push_type": "command_result",
+                        })
+                asyncio.create_task(_run_cmd())
+                yield f"data: {json.dumps({'type': 'command_response', 'content': f'`?{cmd_name}` running in background — result will appear when complete.'})}\n\n"
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                return
             cmd_result = await self.commands.handle(message)
             if cmd_result.handled:
                 yield f"data: {json.dumps({'type': 'command_response', 'content': cmd_result.response})}\n\n"

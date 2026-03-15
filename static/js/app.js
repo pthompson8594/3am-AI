@@ -1583,14 +1583,22 @@ class App {
             });
 
             const data = await response.json();
+            const msg = data.message || data.detail || (approved ? 'Done.' : 'Cancelled.');
 
             const resultClass = approved ? 'approval-success' : 'approval-denied';
             const resultIcon = approved ? '✓' : '✗';
             dialog.innerHTML = `
                 <div class="${resultClass}">
-                    <span>${resultIcon}</span> ${this.escapeHtml(data.message)}
+                    <span>${resultIcon}</span> ${this.escapeHtml(msg)}
                 </div>
             `;
+
+            // Send result back to the model so the conversation can continue
+            const followUp = approved
+                ? `The operation was approved and completed: ${msg}`
+                : `The operation was denied: ${msg}`;
+            setTimeout(() => this.sendMessage(followUp), 600);
+
         } catch (error) {
             dialog.innerHTML = `
                 <div class="approval-error">

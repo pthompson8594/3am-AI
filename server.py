@@ -1319,10 +1319,11 @@ async def handle_file_approval(request: ApprovalResponse, user: User = Depends(g
         raise HTTPException(status_code=400, detail="No pending approval")
     
     if request.approved:
-        result = core.tools.execute_pending_approval()
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, core.tools.execute_pending_approval)
     else:
         result = core.tools.cancel_pending_approval()
-    
+
     return {"message": result, "approved": request.approved}
 
 

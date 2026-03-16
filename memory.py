@@ -123,8 +123,12 @@ memory_type — classify each fact:
 User: {user_message}
 Assistant: {assistant_response}
 
-Respond with JSON — up to 5 facts, priority 3 or higher only:
-{{"facts": [{{"priority": <3-5>, "summary": "<concise durable fact>", "category": "<identity|preferences|activities|projects|interests|other>", "memory_type": "<episodic|declarative|procedural>"}}]}}
+Return a JSON object with a "facts" array (up to 5 items, priority 3-5 only).
+Each fact: {{"priority": integer, "summary": string, "category": string, "memory_type": string}}
+
+Example output:
+{{"facts": [{{"priority": 5, "summary": "User's name is Jordan", "category": "identity", "memory_type": "episodic"}}, {{"priority": 4, "summary": "User prefers Python over JavaScript", "category": "preferences", "memory_type": "episodic"}}]}}
+
 If nothing durable was learned: {{"facts": []}}"""
 
 GROUPING_PROMPT = """Group these conversations by topic. Conversations covering the same subject should be in the same group. A group can be large if the conversations are all closely related.
@@ -285,6 +289,24 @@ def _llm_json_content(response) -> str:
     # Last resort: Qwen3 reasoning_content field (populated when content is null)
     if not content:
         content = (msg.get("reasoning_content") or "").strip()
+
+    # Strip markdown code fences if present (```json ... ``` or ``` ... ```)
+    fence_match = _re.search(r"```(?:json)?\s*([\s\S]*?)```", content)
+    if fence_match:
+        content = fence_match.group(1).strip()
+
+    # If content doesn't start with JSON, scan for a JSON object/array inside it.
+    # Handles models that output "Thinking Process:..." prose before the JSON block.
+    # Require { followed by optional whitespace then " to avoid grabbing prose {fragments}.
+    if content and not content.lstrip().startswith(("{", "[")):
+        json_match = _re.search(r"(\{\s*\"[\s\S]*\}|\[\s*[\{\"][\s\S]*\])", content)
+        if json_match:
+            content = json_match.group(1).strip()
+
+    if not content:
+        print(f"[Memory] _llm_json_content: empty result. msg keys={list(msg.keys())} "
+              f"content={repr(msg.get('content'))} "
+              f"reasoning_content={repr(msg.get('reasoning_content', '(absent)'))[:80]}")
 
     return content
 
@@ -754,15 +776,20 @@ class MemorySystem:
         emb_bytes = np.array(embedding, dtype=np.float32).tobytes()
         conn = self._get_conn()
 
+        # sqlite-vec requires LIMIT directly on the vec0 table — do the knn search
+        # in a subquery first, then join to get memory_type and filter self-links.
         rows = conn.execute("""
-            SELECT vm.memory_id, vm.distance, m.memory_type
-            FROM vec_memories vm
-            JOIN memories m ON m.id = vm.memory_id
-            WHERE vm.embedding MATCH ?
-            AND vm.memory_id != ?
-            ORDER BY vm.distance
-            LIMIT ?
-        """, (emb_bytes, new_id, LANE_MAX_K + 2)).fetchall()
+            SELECT sub.memory_id, sub.distance, m.memory_type
+            FROM (
+                SELECT memory_id, distance
+                FROM vec_memories
+                WHERE embedding MATCH ?
+                ORDER BY distance
+                LIMIT ?
+            ) sub
+            JOIN memories m ON m.id = sub.memory_id
+            WHERE sub.memory_id != ?
+        """, (emb_bytes, LANE_MAX_K + 2, new_id)).fetchall()
 
         links = []
         now = time.time()
@@ -1141,10 +1168,14 @@ class MemorySystem:
                 f"{self.llm_url}/v1/chat/completions",
                 json={
                     "model": self.llm_model_id,
-                    "messages": [{"role": "user", "content": prompt + " /no_think"}],
+                    "messages": [
+                        {"role": "user", "content": prompt},
+                        {"role": "assistant", "content": "</think>\n"},
+                    ],
                     "max_tokens": 100,
                     "temperature": 0.1,
                     "response_format": {"type": "json_object"},
+                    "chat_template_kwargs": {"enable_thinking": False},
                 },
                 timeout=30.0,
             )
@@ -1173,10 +1204,14 @@ class MemorySystem:
                 f"{self.llm_url}/v1/chat/completions",
                 json={
                     "model": self.llm_model_id,
-                    "messages": [{"role": "user", "content": prompt + " /no_think"}],
+                    "messages": [
+                        {"role": "user", "content": prompt},
+                        {"role": "assistant", "content": "</think>\n"},
+                    ],
                     "max_tokens": 100,
                     "temperature": 0.1,
                     "response_format": {"type": "json_object"},
+                    "chat_template_kwargs": {"enable_thinking": False},
                 },
                 timeout=30.0,
             )
@@ -1687,10 +1722,14 @@ class MemorySystem:
                 f"{self.llm_url}/v1/chat/completions",
                 json={
                     "model": self.llm_model_id,
-                    "messages": [{"role": "user", "content": prompt + " /no_think"}],
+                    "messages": [
+                        {"role": "user", "content": prompt},
+                        {"role": "assistant", "content": "</think>\n"},
+                    ],
                     "max_tokens": 80,
                     "temperature": 0.1,
                     "response_format": {"type": "json_object"},
+                    "chat_template_kwargs": {"enable_thinking": False},
                 },
                 timeout=30.0,
             )
@@ -1797,17 +1836,26 @@ class MemorySystem:
                 f"{self.llm_url}/v1/chat/completions",
                 json={
                     "model": self.llm_model_id,
-                    "messages": [{"role": "user", "content": prompt + " /no_think"}],
+                    "messages": [
+                        {"role": "user", "content": prompt},
+                        {"role": "assistant", "content": "</think>\n"},
+                    ],
                     "max_tokens": 400,
                     "temperature": 0.1,
                     "response_format": {"type": "json_object"},
+                    "chat_template_kwargs": {"enable_thinking": False},
                 },
-                timeout=25.0,
+                timeout=120.0,
             )
             parsed = json.loads(_llm_json_content(response))
             return [f for f in parsed.get("facts", []) if int(f.get("priority", 0)) >= 3]
         except Exception as e:
-            print(f"[Memory] Durable fact extraction error: {e}")
+            _raw = ""
+            try:
+                _raw = _llm_json_content(response)[:300]
+            except Exception:
+                pass
+            print(f"[Memory] Durable fact extraction error: {e} | raw={repr(_raw)}")
             return []
 
     async def _store_fact(self, fact: dict, user_message: str = "", assistant_response: str = "") -> Optional[str]:
@@ -2162,10 +2210,14 @@ class MemorySystem:
                 f"{self.llm_url}/v1/chat/completions",
                 json={
                     "model": self.llm_model_id,
-                    "messages": [{"role": "user", "content": prompt + " /no_think"}],
+                    "messages": [
+                        {"role": "user", "content": prompt},
+                        {"role": "assistant", "content": "</think>\n"},
+                    ],
                     "max_tokens": 300,
                     "temperature": 0.1,
                     "response_format": {"type": "json_object"},
+                    "chat_template_kwargs": {"enable_thinking": False},
                 },
                 timeout=30.0,
             )
@@ -2200,10 +2252,14 @@ class MemorySystem:
                     f"{self.llm_url}/v1/chat/completions",
                     json={
                         "model": self.llm_model_id,
-                        "messages": [{"role": "user", "content": prompt + " /no_think"}],
+                        "messages": [
+                            {"role": "user", "content": prompt},
+                            {"role": "assistant", "content": "</think>\n"},
+                        ],
                         "max_tokens": 500,
                         "temperature": 0.1,
                         "response_format": {"type": "json_object"},
+                        "chat_template_kwargs": {"enable_thinking": False},
                     },
                     timeout=45.0,
                 )
@@ -2677,6 +2733,8 @@ class MemorySystem:
 
         try:
             import umap as _umap
+            if n < 10:
+                raise ImportError("too few points for UMAP")
             reducer = _umap.UMAP(
                 n_components=3,
                 n_neighbors=min(15, n - 1),
@@ -2692,7 +2750,7 @@ class MemorySystem:
             centered = embeddings - mean
             _, _, Vt = np.linalg.svd(centered, full_matrices=False)
             coords = centered @ Vt[:3].T
-            print(f"[MemoryViz] PCA 3D: {n} memories (install umap-learn for better results)")
+            print(f"[MemoryViz] PCA 3D: {n} memories (UMAP requires 10+ memories)")
 
         # Normalise each axis to [-50, 50]
         for axis in range(3):

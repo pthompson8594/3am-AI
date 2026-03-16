@@ -260,14 +260,16 @@ def _llm_json_content(response) -> str:
     """
     Extract JSON content from an LLM chat-completions response.
 
-    Qwen3 sometimes puts its JSON *inside* a <think> block and leaves the main
-    content field empty.  Strategy:
-      1. Take the content field, strip any <think>…</think> wrapper → use if non-empty.
-      2. If still empty, pull the raw text out of the think block itself.
-      3. Return whatever we found (may still be empty — caller's json.loads will raise).
+    Qwen3 quirks handled:
+      - content can be null  → fall back to reasoning_content (Qwen3-specific field)
+      - JSON sometimes sits inside a <think> block with empty content after it
+      - Strip any <think>…</think> wrapper; if nothing remains, use the think text
+
+    Priority: content (stripped) → think block text → reasoning_content field
     """
     import re as _re
-    raw = (response.json()["choices"][0]["message"]["content"] or "").strip()
+    msg = response.json()["choices"][0]["message"]
+    raw = (msg.get("content") or "").strip()
 
     # Extract think-block text before stripping, in case we need it as fallback
     think_match = _re.search(r"<think>(.*?)</think>", raw, flags=_re.DOTALL)
@@ -279,6 +281,10 @@ def _llm_json_content(response) -> str:
     # If main content is empty, try the think block text
     if not content and think_text:
         content = think_text
+
+    # Last resort: Qwen3 reasoning_content field (populated when content is null)
+    if not content:
+        content = (msg.get("reasoning_content") or "").strip()
 
     return content
 
@@ -1792,7 +1798,7 @@ class MemorySystem:
                 json={
                     "model": self.llm_model_id,
                     "messages": [{"role": "user", "content": prompt + " /no_think"}],
-                    "max_tokens": 220,
+                    "max_tokens": 400,
                     "temperature": 0.1,
                     "response_format": {"type": "json_object"},
                 },

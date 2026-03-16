@@ -41,14 +41,13 @@ Return ONLY a valid JSON object with this exact structure:
 
 Rules:
 - Every proposition must be self-contained — a reader with no prior context can fully understand it on its own
-- Include the subject explicitly in each proposition (write "The BC250 cluster supports..." not "It supports...")
+- Include the subject explicitly in each proposition
 - Maximum 180 characters per proposition summary
 - Priority scale: 5=critical, 4=important, 3=useful, 2=minor (omit 1-2)
 - Minimum priority to include: 3
 - Group propositions into sections that match the document's natural structure; if the document has no sections, create logical groupings yourself
 - Order propositions within each section in logical reading order (prerequisites before dependents)
-- Do not invent information not present in the document
-"""
+- Do not invent information not present in the document"""
 
 
 # ---------------------------------------------------------------------------
@@ -127,31 +126,77 @@ async def ingest_document(
     if truncated:
         user_content += f"\n\n[Document truncated — only the first {max_chars} characters were processed]"
 
-    response = await client.post(
-        f"{llm_url}/v1/chat/completions",
-        json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": INGEST_SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            "max_tokens": 8000,
-            "stream": False,
-            "response_format": {"type": "json_object"},
-        },
-        timeout=180.0,
-    )
-    response.raise_for_status()
+    print(f"[Ingest] LLM call: {llm_url} model={model} chars={len(user_content)}", flush=True)
 
-    raw = response.json()["choices"][0]["message"]["content"].strip()
+    try:
+        response = await client.post(
+            f"{llm_url}/v1/chat/completions",
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": INGEST_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_content},
+                ],
+                "max_tokens": 8000,
+                "stream": False,
+            },
+            timeout=httpx.Timeout(connect=10.0, read=600.0, write=30.0, pool=5.0),
+        )
+        print(f"[Ingest] LLM response: status={response.status_code} size={len(response.content)}", flush=True)
+        if response.status_code != 200:
+            print(f"[Ingest] Error body: {response.text[:500]}", flush=True)
+        response.raise_for_status()
+    except BaseException as exc:
+        print(f"[Ingest] HTTP request failed: {type(exc).__name__}: {exc}", flush=True)
+        raise
 
-    # Strip markdown code fences if the model wraps the JSON anyway
+    try:
+        resp_json = response.json()
+    except Exception as exc:
+        print(f"[Ingest] Failed to parse response as JSON: {type(exc).__name__}: {exc}", flush=True)
+        print(f"[Ingest] Raw body: {response.text[:500]}", flush=True)
+        raise
+
+    msg = resp_json["choices"][0]["message"]
+    raw = (msg.get("content") or msg.get("reasoning_content") or "").strip()
+    if not raw:
+        raise ValueError("LLM returned empty content and empty reasoning_content")
+    print(f"[Ingest] Raw content ({len(raw)} chars, first 300): {raw[:300]!r}", flush=True)
+
+    # Strip Qwen3 / DeepSeek thinking tokens <think>...</think>
+    if "<think>" in raw:
+        import re as _re
+        raw = _re.sub(r"<think>.*?</think>", "", raw, flags=_re.DOTALL).strip()
+        print(f"[Ingest] After think-strip ({len(raw)} chars, first 200): {raw[:200]!r}", flush=True)
+
+    # Strip markdown code fences if the model wraps the JSON
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[-1]
         if raw.endswith("```"):
             raw = raw[:-3].strip()
 
-    result = json.loads(raw)
+    # Extract JSON object — handles preamble like "Thinking Process:" or prose before the JSON
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        raw = raw[start:end + 1]
+    elif start == -1:
+        raise ValueError(
+            f"No JSON object found in LLM response. "
+            f"First 300 chars: {raw[:300]!r}"
+        )
+
+    if not raw.strip():
+        raise ValueError("LLM returned empty content after extraction")
+
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"[Ingest] JSON parse failed: {exc}", flush=True)
+        print(f"[Ingest] Content that failed to parse: {raw[:500]!r}", flush=True)
+        raise
+
+    print(f"[Ingest] Parsed OK — sections={len(result.get('sections', []))}", flush=True)
     result["doc_name"] = doc_name
     result.setdefault("doc_summary", "")
     result.setdefault("sections", [])

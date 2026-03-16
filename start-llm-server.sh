@@ -91,6 +91,9 @@ llama-server \
     --rope-scale 4 \
     --yarn-orig-ctx 32768 \
     --flash-attn on \
+    --cache-type-k q5_1 \
+    --cache-type-v q5_1 \
+    --no-cache-prompt \
     --threads 12 \
     --host 0.0.0.0 \
     $RPC_ARGS

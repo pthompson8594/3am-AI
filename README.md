@@ -31,10 +31,14 @@ When the model emits `<think>...</think>` tokens (extended reasoning), those are
 ### LLM Status LED
 A small dot in the chat header shows whether llama-server is reachable. Green means the LLM is responding; red means it isn't. Polls every 10 seconds and only updates the DOM on status change.
 
-### Persistent Memory with Torque Clustering and Memory Lanes
-Conversations are extracted into discrete facts, embedded, and organized using a physics-inspired clustering algorithm based on gravitational torque. The system automatically discovers natural topic boundaries — no manual thresholds. High-importance clusters get priority in context retrieval, so the model remembers what matters most.
+### Persistent Memory with Three Universes, Torque Clustering, and Memory Lanes
+Conversations are extracted into discrete facts, embedded, and organized using a physics-inspired clustering algorithm based on gravitational torque. The system automatically discovers natural topic boundaries — no manual thresholds. High-importance clusters get priority in context retrieval.
 
-As memories are stored, the system builds a directed link graph between them — **memory lanes**. Semantically related memories get bidirectional lanes (similar concepts connect freely). When the research system learns something because of a user memory, a one-way causal lane is built from that user memory to the research finding — you can follow it forward, but there's no lane back. Retrieval uses Personalized PageRank through this graph: a query seeds the nearest memories, then activation spreads through their lanes to surface associated context that pure vector search would miss.
+Every memory belongs to one of three universes: **episodic** (personal facts about you), **declarative** (world/technical knowledge, ingested documents, research), or **procedural** (learned patterns and behavioural rules). Each universe decays at a different rate — declarative knowledge persists 3× longer than personal memories, procedural patterns 10× longer. Frequently-recalled memories resist decay regardless of universe.
+
+Context retrieval is query-aware: the query is classified as personal, factual, procedural, or balanced, and a 12-memory budget is split accordingly. A factual question draws more from the knowledge universe; a personal question draws more from the episodic universe. Context is returned in labelled sections (`## Personal`, `## Knowledge`, `## Patterns`) so the model can reason about the source.
+
+As memories are stored, the system builds a directed link graph — **memory lanes**. Same-universe lanes are bidirectional. Cross-universe lanes are one-way: episodic memories can reach into declarative knowledge, but not the reverse. Causal lanes from user memories to research findings are always one-way. Retrieval uses Personalized PageRank through this graph: a query seeds the nearest memories, then activation spreads through their lanes to surface associated context that pure vector search would miss.
 
 Retrieval is hybrid: BM25 full-text search and vector similarity run in parallel and are merged with Reciprocal Rank Fusion, so exact keyword matches and semantic matches are both surfaced. The embedder is unloaded from RAM after writes and only reloaded when needed, keeping idle memory use low.
 
@@ -65,7 +69,7 @@ Feed documents directly into the assistant from the chat input. Click **[+]** to
 Supported formats: `.txt`, `.md`, `.pdf`, `.docx`, `.csv`, `.log`, `.rst`. PDF support requires `pymupdf` or `pypdf`; DOCX requires `python-docx`.
 
 ### 3D Memory Visualization
-A live star-map shows your memory space — clusters as suns, individual memories as orbiting planets. Memory lanes are rendered as edges between planets: solid lines for semantic connections, dashed directional lines for causal lanes pointing toward research findings. Useful for spotting cluster health and understanding how your AI connects what it knows about you.
+A live star-map shows your memory space — clusters as suns, individual memories as orbiting planets. Memory lanes are rendered as edges between planets: solid lines for semantic connections, dashed directional lines for causal lanes pointing toward research findings. Nodes are colour-coded by universe: amber for episodic (personal), blue for declarative (knowledge), green for procedural (patterns). Hover any node to see its summary, category, priority, and universe type.
 
 ---
 

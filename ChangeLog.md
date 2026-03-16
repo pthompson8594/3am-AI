@@ -1,5 +1,72 @@
 # Changelog
 
+## 1.4.0 (2026-03-16)
+
+### Three-universe memory system
+
+Memory is now partitioned into three separate universes with distinct decay rates, retrieval budgets, and lane directionality:
+
+| Universe | Purpose | Decay multiplier |
+|---|---|---|
+| **Episodic** | Personal facts, preferences, experiences — "I/my/we" knowledge | 1.0× (standard) |
+| **Declarative** | World/technical knowledge, ingested documents, research findings | 0.3× (slow) |
+| **Procedural** | Learned patterns, behavioural rules, "when X do Y" knowledge | 0.1× (very slow) |
+
+Classification:
+- Conversation facts: LLM classifies each extracted fact as `episodic | declarative | procedural`
+- Ingested documents: always `declarative` + `source_type=ingestion` regardless of LLM output
+- Research findings: always `declarative` + `source_type=research` regardless of LLM output
+
+### Dynamic context allocation
+
+Queries are classified as `personal | factual | procedural | balanced` by `_classify_query` (keyword heuristic, no LLM call). The retrieval budget (12 memories total) is split per `CONTEXT_BIAS`:
+
+| Query type | Episodic | Declarative | Procedural |
+|---|---|---|---|
+| personal | 7 | 3 | 2 |
+| factual | 2 | 8 | 2 |
+| procedural | 2 | 3 | 7 |
+| balanced | 4 | 5 | 3 |
+
+Context is returned in three labelled sections (`## Personal`, `## Knowledge`, `## Patterns`) so the model can reason about source type.
+
+### Access-count decay resistance
+
+`MemoryEntry` now tracks `access_count` (incremented every retrieval) and `last_accessed` (timestamp). Decay formula updated:
+
+```
+effective_rate = base_rate × universe_multiplier × (1 / (1 + access_count))
+```
+
+Frequently-recalled memories resist forgetting. Kept separate from Torque cluster geometry so high-access memories don't warp semantic distances.
+
+### Universe-aware semantic lanes
+
+`_build_semantic_links` now accepts the new memory's universe and looks up neighbor universes via a JOIN on `memories.memory_type`:
+- Same universe → bidirectional (both rows, as before)
+- Cross-universe → one-way: new_id → neighbor only
+
+This lets PPR walk from an episodic seed into declarative knowledge, but prevents declarative nodes from pulling episodic memories into unrelated retrieval paths.
+
+### Memory viz universe coloring
+
+Star-map nodes are now tinted by universe:
+- Amber/gold — episodic (personal, close to the user)
+- Cyan/blue — declarative (reference knowledge, distant nebula)
+- Green/teal — procedural (learned patterns)
+
+Clustered nodes blend 70% cluster colour + 30% universe tint. Unclustered nodes show pure universe colour. Tooltip and legend both updated.
+
+### Schema additions
+
+Four new columns on `memories` table (migrated automatically via `ALTER TABLE … ADD COLUMN … DEFAULT`):
+- `memory_type TEXT NOT NULL DEFAULT 'episodic'`
+- `source_type TEXT NOT NULL DEFAULT 'conversation'`
+- `access_count INTEGER NOT NULL DEFAULT 0`
+- `last_accessed REAL NOT NULL DEFAULT 0`
+
+---
+
 ## 1.3.0 (2026-03-15)
 
 ### Agentic multi-step tool loop

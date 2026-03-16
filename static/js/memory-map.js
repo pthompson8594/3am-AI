@@ -22,6 +22,19 @@ function clusterHue(index, _total) {
     return ((index * GOLDEN) % 360) / 360;
 }
 
+/**
+ * Base colour tints per memory universe.
+ *   episodic   — warm amber/gold  (personal, close to the user)
+ *   declarative — cool cyan/blue  (reference knowledge, distant nebula)
+ *   procedural  — soft green/teal (learned patterns, bioluminescent)
+ */
+const UNIVERSE_COLORS = {
+    episodic:    new THREE.Color(0xffaa44),
+    declarative: new THREE.Color(0x44aaff),
+    procedural:  new THREE.Color(0x44ffaa),
+};
+const UNIVERSE_FALLBACK = new THREE.Color(0x667799);
+
 // ── Main class ─────────────────────────────────────────────────────────────
 
 class MemoryMapViz {
@@ -194,7 +207,7 @@ class MemoryMapViz {
 
         const detail = document.getElementById('memory-map-detail');
         if (detail) detail.innerHTML =
-            '<div class="mm-hint">Hover a star · click a cluster name · <span style="color:#4488ff">━</span> semantic lanes · <span style="color:#ffaa44">━</span> research links</div>';
+            '<div class="mm-hint">Hover a star · click a cluster name · <span style="color:#4488ff">━</span> semantic · <span style="color:#ffaa44">━</span> research · <span style="color:#ffaa44">●</span> episodic <span style="color:#44aaff">●</span> declarative <span style="color:#44ffaa">●</span> procedural</div>';
     }
 
     /** Build the Points mesh — one point per memory with per-vertex colour + size. */
@@ -210,9 +223,14 @@ class MemoryMapViz {
             positions[i * 3 + 1] = m.y;
             positions[i * 3 + 2] = m.z;
 
-            const col = (m.cluster_id && this.clusterColors[m.cluster_id])
-                ? this.clusterColors[m.cluster_id]
-                : new THREE.Color(0x667799);
+            const universeCol = UNIVERSE_COLORS[m.memory_type] || UNIVERSE_FALLBACK;
+            let col;
+            if (m.cluster_id && this.clusterColors[m.cluster_id]) {
+                // Blend: 70% cluster colour + 30% universe tint
+                col = this.clusterColors[m.cluster_id].clone().lerp(universeCol, 0.30);
+            } else {
+                col = universeCol;
+            }
             colors[i * 3]     = col.r;
             colors[i * 3 + 1] = col.g;
             colors[i * 3 + 2] = col.b;
@@ -701,9 +719,10 @@ class MemoryMapViz {
 
             const mem = this.starPoints.userData.memories[idx];
             if (mem && this.tooltip) {
+                const uLabel = mem.memory_type || 'episodic';
                 this.tooltip.innerHTML = `
                     <div class="mm-tip-summary">${this._esc(mem.summary)}</div>
-                    <div class="mm-tip-meta">${this._esc(mem.category)} &middot; priority ${mem.priority}</div>
+                    <div class="mm-tip-meta">${this._esc(mem.category)} &middot; priority ${mem.priority} &middot; ${uLabel}</div>
                 `;
                 this.tooltip.style.left = (e.clientX - rect.left + 16) + 'px';
                 this.tooltip.style.top  = (e.clientY - rect.top  - 8)  + 'px';

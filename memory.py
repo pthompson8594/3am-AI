@@ -57,6 +57,27 @@ DECAY_RATES = {
     1: 0.1,
 }
 
+# ── Three-universe memory constants ──────────────────────────────────────────
+# episodic   — personal experiences, preferences, conversation facts
+# declarative — world knowledge, ingested documents, research findings
+# procedural  — learned patterns, behavioural rules, how-to knowledge
+VALID_UNIVERSES = {"episodic", "declarative", "procedural"}
+
+# Base decay rate multipliers per universe (applied on top of priority rates)
+UNIVERSE_DECAY_MULTIPLIERS = {
+    "episodic":    1.0,   # standard decay — personal memories fade naturally
+    "declarative": 0.3,   # slow decay — reference knowledge persists
+    "procedural":  0.1,   # very slow decay — only replaced by better patterns
+}
+
+# Context allocation bias per query type (episodic, declarative, procedural)
+CONTEXT_BIAS = {
+    "personal":    (0.55, 0.25, 0.20),
+    "factual":     (0.17, 0.63, 0.20),  # rounds to 2+8+2=12 (0.20,0.60,0.20 rounded to 11)
+    "procedural":  (0.20, 0.25, 0.55),
+    "balanced":    (0.35, 0.40, 0.25),
+}
+
 # ── Memory lane constants ─────────────────────────────────────────────────
 LANE_MIN_SIM  = 0.55   # below this = unrelated, no semantic lane
 LANE_MAX_SIM  = 0.92   # above this = duplicate (already deduped before here)
@@ -94,11 +115,16 @@ Priority:
 4 - Remember for MONTHS (preferences, skills, installed tools, hardware specs)
 3 - Remember for WEEKS (ongoing projects, patterns, recurring topics)
 
+memory_type — classify each fact:
+- "episodic"    : personal to the user (preferences, identity, experiences, "I/my/we" facts)
+- "declarative" : general world/technical knowledge (how things work, external facts, tool docs)
+- "procedural"  : learned patterns, behavioural rules, "when X do Y" knowledge
+
 User: {user_message}
 Assistant: {assistant_response}
 
 Respond with JSON — up to 5 facts, priority 3 or higher only:
-{{"facts": [{{"priority": <3-5>, "summary": "<concise durable fact>", "category": "<identity|preferences|activities|projects|interests|other>"}}]}}
+{{"facts": [{{"priority": <3-5>, "summary": "<concise durable fact>", "category": "<identity|preferences|activities|projects|interests|other>", "memory_type": "<episodic|declarative|procedural>"}}]}}
 If nothing durable was learned: {{"facts": []}}"""
 
 GROUPING_PROMPT = """Group these conversations by topic. Conversations covering the same subject should be in the same group. A group can be large if the conversations are all closely related.
@@ -139,6 +165,10 @@ class MemoryEntry:
     summary: str
     cluster_id: Optional[str] = None
     embedding: Optional[list[float]] = None  # Not kept in RAM; only set transiently
+    memory_type: str = "episodic"     # episodic | declarative | procedural
+    source_type: str = "conversation" # conversation | ingestion | research
+    access_count: int = 0             # incremented each retrieval; decay resistance
+    last_accessed: float = 0.0        # timestamp of last retrieval
 
 
 @dataclass
@@ -224,6 +254,55 @@ def _rrf_merge(list_a: list, list_b: list, k: int = 60) -> list:
     for rank, item in enumerate(list_b):
         scores[item] = scores.get(item, 0.0) + 1.0 / (k + rank + 1)
     return sorted(scores, key=lambda x: -scores[x])
+
+
+def _llm_json_content(response) -> str:
+    """
+    Extract JSON content from an LLM chat-completions response.
+
+    Qwen3 sometimes puts its JSON *inside* a <think> block and leaves the main
+    content field empty.  Strategy:
+      1. Take the content field, strip any <think>…</think> wrapper → use if non-empty.
+      2. If still empty, pull the raw text out of the think block itself.
+      3. Return whatever we found (may still be empty — caller's json.loads will raise).
+    """
+    import re as _re
+    raw = (response.json()["choices"][0]["message"]["content"] or "").strip()
+
+    # Extract think-block text before stripping, in case we need it as fallback
+    think_match = _re.search(r"<think>(.*?)</think>", raw, flags=_re.DOTALL)
+    think_text = think_match.group(1).strip() if think_match else ""
+
+    # Strip think block from main content
+    content = _re.sub(r"<think>.*?</think>", "", raw, flags=_re.DOTALL).strip()
+
+    # If main content is empty, try the think block text
+    if not content and think_text:
+        content = think_text
+
+    return content
+
+
+def _classify_query(query: str) -> str:
+    """
+    Heuristic classifier for three-universe context allocation.
+    Returns: "personal" | "factual" | "procedural" | "balanced"
+    """
+    q = query.lower()
+    personal  = sum(1 for w in ("i ", "my ", " me ", " i'", " we ", "our ", "prefer", "like ", "feel ", "tell me about myself", "what do i") if w in q)
+    factual   = sum(1 for w in ("how ", "what is", "explain", "define", "does ", "work ", "what are", "describe", "documentation") if w in q)
+    procedural = sum(1 for w in ("when ", "should ", "pattern", "behavior", "behave", "rule ", "always ", "never ", "if i", "next time", "remember to") if w in q)
+
+    mx = max(personal, factual, procedural)
+    if mx == 0:
+        return "balanced"
+    if personal == mx and personal > factual and personal > procedural:
+        return "personal"
+    if factual == mx and factual > personal and factual > procedural:
+        return "factual"
+    if procedural == mx and procedural > personal and procedural > factual:
+        return "procedural"
+    return "balanced"
 
 
 # ── Memory system ─────────────────────────────────────────────────────────────
@@ -340,14 +419,18 @@ class MemorySystem:
         conn = self._get_conn()
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS memories (
-                id          TEXT PRIMARY KEY,
-                summary     TEXT NOT NULL,
-                category    TEXT NOT NULL DEFAULT 'general',
-                priority    INTEGER NOT NULL DEFAULT 3,
-                timestamp   REAL NOT NULL,
-                cluster_id  TEXT,
-                message     TEXT NOT NULL DEFAULT '',
-                response    TEXT NOT NULL DEFAULT ''
+                id           TEXT PRIMARY KEY,
+                summary      TEXT NOT NULL,
+                category     TEXT NOT NULL DEFAULT 'general',
+                priority     INTEGER NOT NULL DEFAULT 3,
+                timestamp    REAL NOT NULL,
+                cluster_id   TEXT,
+                message      TEXT NOT NULL DEFAULT '',
+                response     TEXT NOT NULL DEFAULT '',
+                memory_type  TEXT NOT NULL DEFAULT 'episodic',
+                source_type  TEXT NOT NULL DEFAULT 'conversation',
+                access_count INTEGER NOT NULL DEFAULT 0,
+                last_accessed REAL NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS clusters (
@@ -420,6 +503,18 @@ class MemorySystem:
             INSERT INTO fts_memories(memory_id, summary)
             SELECT id, summary FROM memories
         """)
+
+        # Migrate existing DBs — add new columns if they don't exist yet
+        for col, definition in [
+            ("memory_type",  "TEXT NOT NULL DEFAULT 'episodic'"),
+            ("source_type",  "TEXT NOT NULL DEFAULT 'conversation'"),
+            ("access_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_accessed","REAL NOT NULL DEFAULT 0"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE memories ADD COLUMN {col} {definition}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
         conn.commit()
 
@@ -513,7 +608,8 @@ class MemorySystem:
         _d = (lambda s: enc.decrypt_str(s)) if (enc and enc.config.enabled) else (lambda s: s)
 
         for row in conn.execute(
-            "SELECT id, summary, category, priority, timestamp, cluster_id, message, response FROM memories"
+            "SELECT id, summary, category, priority, timestamp, cluster_id, message, response, "
+            "memory_type, source_type, access_count, last_accessed FROM memories"
         ):
             self.messages[row["id"]] = MemoryEntry(
                 id=row["id"],
@@ -525,6 +621,10 @@ class MemorySystem:
                 message=_d(row["message"]),
                 response=_d(row["response"]),
                 embedding=None,
+                memory_type=row["memory_type"] or "episodic",
+                source_type=row["source_type"] or "conversation",
+                access_count=row["access_count"] or 0,
+                last_accessed=row["last_accessed"] or 0.0,
             )
 
         for row in conn.execute(
@@ -577,12 +677,15 @@ class MemorySystem:
             conn = self._get_conn()
             conn.execute("""
                 INSERT OR REPLACE INTO memories
-                (id, summary, category, priority, timestamp, cluster_id, message, response)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (id, summary, category, priority, timestamp, cluster_id, message, response,
+                 memory_type, source_type, access_count, last_accessed)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 entry.id, _e(entry.summary), entry.category, entry.priority,
                 entry.timestamp, entry.cluster_id,
                 _e(entry.message[:500]), _e(entry.response[:500]),
+                entry.memory_type, entry.source_type,
+                entry.access_count, entry.last_accessed,
             ))
             conn.execute("DELETE FROM vec_memories WHERE memory_id=?", (entry.id,))
             conn.execute(
@@ -628,20 +731,30 @@ class MemorySystem:
 
     # ── Memory lane building ───────────────────────────────────────────────
 
-    def _build_semantic_links(self, new_id: str, embedding: list[float]) -> int:
+    def _build_semantic_links(
+        self, new_id: str, embedding: list[float], new_universe: str = "episodic"
+    ) -> int:
         """
-        Find the K nearest neighbors of a new memory and create bidirectional
-        semantic lanes to each neighbor within the [LANE_MIN_SIM, LANE_MAX_SIM) range.
-        Returns the number of lanes created (not rows — each lane = 2 rows).
+        Find the K nearest neighbors of a new memory and create semantic lanes.
+
+        Same universe  → bidirectional (both rows).
+        Cross-universe → one-way: new_id→neighbor only.
+          This lets PPR walk FROM the new memory INTO other universes when semantically
+          relevant, but prevents neighbors from "pulling back" across universes during
+          their own PPR expansions.
+
+        Returns the number of lanes created (not rows).
         """
         emb_bytes = np.array(embedding, dtype=np.float32).tobytes()
         conn = self._get_conn()
 
         rows = conn.execute("""
-            SELECT memory_id, distance FROM vec_memories
-            WHERE embedding MATCH ?
-            AND memory_id != ?
-            ORDER BY distance
+            SELECT vm.memory_id, vm.distance, m.memory_type
+            FROM vec_memories vm
+            JOIN memories m ON m.id = vm.memory_id
+            WHERE vm.embedding MATCH ?
+            AND vm.memory_id != ?
+            ORDER BY vm.distance
             LIMIT ?
         """, (emb_bytes, new_id, LANE_MAX_K + 2)).fetchall()
 
@@ -650,9 +763,13 @@ class MemorySystem:
         for row in rows:
             sim = 1.0 - row["distance"]
             if LANE_MIN_SIM <= sim < LANE_MAX_SIM:
-                # Bidirectional — store both directions as separate rows
-                links.append((new_id,       row["memory_id"], sim, "semantic", now))
-                links.append((row["memory_id"], new_id,       sim, "semantic", now))
+                neighbor_universe = row["memory_type"] or "episodic"
+                same_universe = (neighbor_universe == new_universe)
+                # Always add new_id → neighbor
+                links.append((new_id, row["memory_id"], sim, "semantic", now))
+                if same_universe:
+                    # Add reverse only within the same universe
+                    links.append((row["memory_id"], new_id, sim, "semantic", now))
 
         if links:
             with self._write_lock:
@@ -664,7 +781,8 @@ class MemorySystem:
                 conn.commit()
             self._lanes_ready = True
 
-        return len(links) // 2
+        # Count distinct lanes (a cross-universe link = 1 lane = 1 row)
+        return len(links)
 
     def _build_causal_links(
         self, research_memory_id: str, source_memory_ids: list[str]
@@ -809,7 +927,8 @@ class MemorySystem:
         doc_id = None
         if doc_summary:
             doc_id = await self._store_fact(
-                {"summary": doc_summary[:200], "category": "document", "priority": 4},
+                {"summary": doc_summary[:200], "category": "document", "priority": 4,
+                 "memory_type": "declarative", "source_type": "ingestion"},
                 user_message=user_msg,
             )
 
@@ -826,7 +945,8 @@ class MemorySystem:
             if sec_summary:
                 sec_label = f"{doc_name} — {sec_name}: {sec_summary}"
                 section_id = await self._store_fact(
-                    {"summary": sec_label[:200], "category": "document_section", "priority": 3},
+                    {"summary": sec_label[:200], "category": "document_section", "priority": 3,
+                     "memory_type": "declarative", "source_type": "ingestion"},
                     user_message=user_msg,
                 )
                 section_count += 1
@@ -834,7 +954,10 @@ class MemorySystem:
             # Store propositions and collect their IDs for link building
             prop_ids = []
             for prop in propositions:
-                pid = await self._store_fact(prop, user_message=user_msg)
+                pid = await self._store_fact(
+                    {**prop, "memory_type": "declarative", "source_type": "ingestion"},
+                    user_message=user_msg,
+                )
                 if pid:
                     prop_ids.append(pid)
                     total_props += 1
@@ -919,8 +1042,13 @@ class MemorySystem:
 
     def _calculate_retention(self, entry: MemoryEntry, current_time: float) -> float:
         age_hours = (current_time - entry.timestamp) / 3600
-        decay_rate = DECAY_RATES.get(entry.priority, DECAY_RATES[1])
-        return math.exp(-decay_rate * age_hours)
+        base_rate = DECAY_RATES.get(entry.priority, DECAY_RATES[1])
+        universe_mult = UNIVERSE_DECAY_MULTIPLIERS.get(entry.memory_type, 1.0)
+        # Frequently-accessed memories resist decay — kept separate from Torque
+        # cluster geometry so high-access memories don't warp semantic distances.
+        access_resistance = 1.0 / (1.0 + entry.access_count)
+        effective_rate = base_rate * universe_mult * access_resistance
+        return math.exp(-effective_rate * age_hours)
 
     def _calculate_cluster_health(self, cluster: MemoryCluster, current_time: float) -> float:
         valid_refs = [r for r in cluster.message_refs if r in self.messages]
@@ -1014,7 +1142,7 @@ class MemorySystem:
                 },
                 timeout=30.0,
             )
-            parsed = json.loads(response.json()["choices"][0]["message"]["content"])
+            parsed = json.loads(_llm_json_content(response))
             return parsed.get("theme", "General")[:100]
         except Exception as e:
             print(f"[Memory] Theme generation error: {e}")
@@ -1046,7 +1174,7 @@ class MemorySystem:
                 },
                 timeout=30.0,
             )
-            parsed = json.loads(response.json()["choices"][0]["message"]["content"])
+            parsed = json.loads(_llm_json_content(response))
             return parsed.get("theme", "General")[:100]
         except Exception as e:
             print(f"[Memory] Async theme error: {e}")
@@ -1228,22 +1356,33 @@ class MemorySystem:
 
     def get_relevant_context(self, query: str, max_clusters: int = 2) -> str:
         """
-        Retrieve relevant memory context using vector seeds + PPR lane traversal.
+        Three-universe retrieval with dynamic context allocation.
 
-        Step 1: Embed query, find top-5 seed memories via vec MATCH (direct similarity).
-        Step 2: Run PPR through the lane graph from those seeds — surfaces memories
-                associated with the seeds even if not directly similar to the query.
-        Step 3: Format results grouped by cluster theme.
+        1. Classify query → personal | factual | procedural | balanced
+        2. Seed: FTS5 BM25 + vec, merged with RRF
+        3. PPR expand through the lane graph
+        4. Split results by universe, apply CONTEXT_BIAS budget caps
+        5. Increment access_count for recalled memories
+        6. Format with per-universe sections
 
-        Falls back to legacy cluster-centroid scoring if no lanes exist yet
-        (before the first backfill runs or on a fresh install).
+        Falls back to legacy cluster-centroid scoring if no seeds or lanes exist.
         """
         if not self.messages:
             return ""
 
         conn = self._get_conn()
 
-        # Step 1a: FTS5 BM25 keyword seeds — always runs, no embedding needed
+        # Step 1: classify query → dynamic budget split
+        query_type = _classify_query(query)
+        ep_bias, dec_bias, proc_bias = CONTEXT_BIAS[query_type]
+        total_budget = 12
+        budgets = {
+            "episodic":    max(1, round(ep_bias   * total_budget)),
+            "declarative": max(1, round(dec_bias  * total_budget)),
+            "procedural":  max(1, round(proc_bias * total_budget)),
+        }
+
+        # Step 2a: FTS5 BM25 keyword seeds
         fts_query = " OR ".join(
             f'"{w}"' for w in query.split()[:8] if len(w) > 2
         )
@@ -1260,7 +1399,7 @@ class MemorySystem:
             except Exception:
                 pass  # malformed query — safe to ignore
 
-        # Step 1b: vec seeds — only if embedder already resident in RAM
+        # Step 2b: vec seeds — only if embedder already resident in RAM
         vec_seeds: list[str] = []
         query_embedding: Optional[list[float]] = None
         if self._embedder_loaded():
@@ -1274,7 +1413,7 @@ class MemorySystem:
             """, (emb_bytes,)).fetchall()
             vec_seeds = [r["memory_id"] for r in vec_rows if r["memory_id"] in self.messages]
 
-        # Step 1c: merge with RRF
+        # Step 2c: merge with RRF
         seed_ids = _rrf_merge(fts_seeds, vec_seeds, k=60)[:5]
 
         if not seed_ids:
@@ -1293,15 +1432,15 @@ class MemorySystem:
             query_embedding = query_embedding or self._embed_cached(query)
             return self._legacy_cluster_context(query_embedding, max_clusters)
 
-        # Step 2: check for lanes — fall back gracefully if none exist yet.
-        # Cache the result so we don't hit the DB on every retrieval call.
+        # Step 3: PPR expand — fetch slightly more than total_budget to give each
+        # universe enough candidates before applying per-universe caps.
         if self._lanes_ready is None:
             self._lanes_ready = conn.execute(
                 "SELECT COUNT(*) FROM memory_links LIMIT 1"
             ).fetchone()[0] > 0
 
         if self._lanes_ready:
-            ranked = self._ppr_expand(seed_ids)
+            ranked = self._ppr_expand(seed_ids, top_k=total_budget + 6)
         else:
             ranked = [(sid, 1.0) for sid in seed_ids]
 
@@ -1309,25 +1448,65 @@ class MemorySystem:
             query_embedding = query_embedding or self._embed_cached(query)
             return self._legacy_cluster_context(query_embedding, max_clusters)
 
-        # Step 3: format grouped by cluster
-        context_parts = ["[MEMORY CONTEXT - Things you know about this user:]"]
-        seen_themes: set[str] = set()
-
-        for memory_id, _score in ranked:
+        # Step 4: split by universe, apply budget caps
+        universe_buckets: dict[str, list[tuple[str, float]]] = {
+            "episodic": [], "declarative": [], "procedural": []
+        }
+        for memory_id, score in ranked:
             entry = self.messages.get(memory_id)
             if not entry:
                 continue
-            cluster = self.clusters.get(entry.cluster_id or "") if entry.cluster_id else None
-            theme = cluster.theme if cluster else entry.category.title()
+            u = entry.memory_type if entry.memory_type in VALID_UNIVERSES else "episodic"
+            bucket = universe_buckets[u]
+            if len(bucket) < budgets[u]:
+                bucket.append((memory_id, score))
 
-            if theme not in seen_themes:
-                context_parts.append(f"\n## {theme}")
-                seen_themes.add(theme)
+        # Step 5: increment access_count for all recalled memories
+        recalled_ids = [mid for bucket in universe_buckets.values() for mid, _ in bucket]
+        if recalled_ids:
+            now = time.time()
+            with self._write_lock:
+                conn.executemany(
+                    "UPDATE memories SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
+                    [(now, mid) for mid in recalled_ids],
+                )
+                conn.commit()
+            for mid in recalled_ids:
+                entry = self.messages.get(mid)
+                if entry:
+                    entry.access_count += 1
+                    entry.last_accessed = now
 
-            prefix = "[Research] " if entry.category == "research" else ""
-            context_parts.append(f"- {prefix}{entry.summary}")
+        # Step 6: format with per-universe sections
+        section_labels = {
+            "episodic":    "Personal",
+            "declarative": "Knowledge",
+            "procedural":  "Patterns",
+        }
+        context_parts = ["[MEMORY CONTEXT]"]
+        has_content = False
 
-        if len(context_parts) <= 1:
+        for universe in ("episodic", "declarative", "procedural"):
+            bucket = universe_buckets[universe]
+            if not bucket:
+                continue
+            has_content = True
+            context_parts.append(f"\n## {section_labels[universe]}")
+            seen_themes: set[str] = set()
+            for memory_id, _score in bucket:
+                entry = self.messages.get(memory_id)
+                if not entry:
+                    continue
+                cluster = self.clusters.get(entry.cluster_id or "") if entry.cluster_id else None
+                theme = cluster.theme if cluster else entry.category.title()
+                if theme not in seen_themes:
+                    context_parts.append(f"  [{theme}]")
+                    seen_themes.add(theme)
+                prefix = "[Research] " if entry.category == "research" else ""
+                context_parts.append(f"  - {prefix}{entry.summary}")
+
+        if not has_content:
+            query_embedding = query_embedding or self._embed_cached(query)
             return self._legacy_cluster_context(query_embedding, max_clusters)
 
         context_parts.append("\n[Use this context naturally in your responses when relevant.]")
@@ -1509,7 +1688,7 @@ class MemorySystem:
                 },
                 timeout=30.0,
             )
-            parsed = json.loads(response.json()["choices"][0]["message"]["content"])
+            parsed = json.loads(_llm_json_content(response))
             profile = parsed.get("profile", "").strip()
         except Exception as e:
             print(f"[Memory] Profile generation error: {e}")
@@ -1619,7 +1798,7 @@ class MemorySystem:
                 },
                 timeout=25.0,
             )
-            parsed = json.loads(response.json()["choices"][0]["message"]["content"])
+            parsed = json.loads(_llm_json_content(response))
             return [f for f in parsed.get("facts", []) if int(f.get("priority", 0)) >= 3]
         except Exception as e:
             print(f"[Memory] Durable fact extraction error: {e}")
@@ -1638,6 +1817,16 @@ class MemorySystem:
             priority = 2
         summary = fact.get("summary", "").strip()[:200]
         category = fact.get("category", "general")
+
+        # Universe routing — source_type overrides LLM classification for ingestion/research
+        raw_type = fact.get("memory_type", "episodic")
+        source_type = fact.get("source_type", "conversation")
+        if source_type in ("ingestion", "research"):
+            memory_type = "declarative"
+        elif raw_type in VALID_UNIVERSES:
+            memory_type = raw_type
+        else:
+            memory_type = "episodic"
 
         if not summary or priority < 2:
             return None
@@ -1672,10 +1861,14 @@ class MemorySystem:
             summary=summary,
             cluster_id=None,
             embedding=None,
+            memory_type=memory_type,
+            source_type=source_type,
+            access_count=0,
+            last_accessed=0.0,
         )
         self.messages[entry_id] = entry
         self._save_memory(entry, embedding)
-        self._build_semantic_links(entry_id, embedding)
+        self._build_semantic_links(entry_id, embedding, new_universe=memory_type)
 
         self._clustering_dirty = True
         if priority >= 4:
@@ -1737,6 +1930,8 @@ class MemorySystem:
             "summary": fact,
             "priority": priority,
             "category": "research",
+            "memory_type": "declarative",
+            "source_type": "research",
         }
         memory_id = await self._store_fact(fact_dict, user_message=f"[Research] {topic}", assistant_response=fact)
         if memory_id and source_memory_ids:
@@ -1790,7 +1985,8 @@ class MemorySystem:
         ids, embeddings = self._fetch_all_embeddings(orphans)
 
         for i, (mid, emb) in enumerate(zip(ids, embeddings)):
-            self._build_semantic_links(mid, emb.tolist())
+            universe = getattr(self.messages.get(mid), "memory_type", "episodic")
+            self._build_semantic_links(mid, emb.tolist(), new_universe=universe)
             # Yield to the event loop every 10 memories to avoid blocking asyncio.
             if i % 10 == 9:
                 await asyncio.sleep(0)
@@ -1967,7 +2163,7 @@ class MemorySystem:
                 },
                 timeout=30.0,
             )
-            parsed = json.loads(response.json()["choices"][0]["message"]["content"])
+            parsed = json.loads(_llm_json_content(response))
             groups = parsed.get("groups", [])
             covered = {i for g in groups for i in g}
             missing = [i for i in range(count) if i not in covered]
@@ -2005,7 +2201,7 @@ class MemorySystem:
                     },
                     timeout=45.0,
                 )
-                parsed = json.loads(response.json()["choices"][0]["message"]["content"])
+                parsed = json.loads(_llm_json_content(response))
                 facts = parsed.get("facts", [])
                 return [f for f in facts if safe_priority(f) >= 2][:8]
             except Exception as e:
@@ -2392,6 +2588,9 @@ class MemorySystem:
                 "priority": entry.priority,
                 "cluster_id": entry.cluster_id or "",
                 "timestamp": entry.timestamp,
+                "memory_type": entry.memory_type or "episodic",
+                "source_type": entry.source_type or "conversation",
+                "access_count": entry.access_count,
                 "x": float(x),
                 "y": float(y),
                 "z": float(z),
@@ -2506,8 +2705,8 @@ class MemorySystem:
 
         memories = []
         for row in conn.execute(
-            "SELECT id, summary, category, priority, timestamp, cluster_id, message, response "
-            "FROM memories ORDER BY timestamp"
+            "SELECT id, summary, category, priority, timestamp, cluster_id, message, response, "
+            "memory_type, source_type, access_count, last_accessed FROM memories ORDER BY timestamp"
         ):
             memories.append(dict(row))
 
@@ -2610,8 +2809,9 @@ class MemorySystem:
                     mem_id = m["id"]
                     conn.execute(
                         "INSERT OR IGNORE INTO memories "
-                        "(id, summary, category, priority, timestamp, cluster_id, message, response) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        "(id, summary, category, priority, timestamp, cluster_id, message, response, "
+                        "memory_type, source_type, access_count, last_accessed) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             mem_id,
                             m["summary"],
@@ -2621,6 +2821,10 @@ class MemorySystem:
                             None,  # cluster_id — rebuilt by next introspection
                             m.get("message", "")[:500],
                             m.get("response", "")[:500],
+                            m.get("memory_type", "episodic"),
+                            m.get("source_type", "conversation"),
+                            m.get("access_count", 0),
+                            m.get("last_accessed", 0.0),
                         ),
                     )
                     emb_bytes = np.array(emb, dtype=np.float32).tobytes()

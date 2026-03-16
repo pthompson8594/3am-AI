@@ -52,3 +52,4 @@ OPTIMIZATIONS_TODO.md
 # OS
 .DS_Store
 Thumbs.db
+rpc-workers.json

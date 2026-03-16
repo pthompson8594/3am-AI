@@ -12,8 +12,8 @@
 PORT="${RPC_PORT:-50052}"
 HOST="${RPC_HOST:-0.0.0.0}"
 
-if ! command -v llama-rpc-server &> /dev/null; then
-    echo "Error: llama-rpc-server not found."
+if ! command -v rpc-server &> /dev/null; then
+    echo "Error: rpc-server not found."
     echo ""
     echo "llama.cpp must be built with RPC support:"
     echo "  cmake -B build -DGGML_RPC=ON -DGGML_CUDA=ON   # NVIDIA"
@@ -21,7 +21,7 @@ if ! command -v llama-rpc-server &> /dev/null; then
     echo "  cmake -B build -DGGML_RPC=ON -DGGML_VULKAN=ON # Vulkan"
     echo "  cmake --build build --config Release -j"
     echo ""
-    echo "The llama-rpc-server binary will be at build/bin/llama-rpc-server"
+    echo "The rpc-server binary will be at build/bin/rpc-server"
     exit 1
 fi
 
@@ -37,4 +37,4 @@ echo "Keep this running while 3AM is in use. Stop it to remove this"
 echo "worker from the inference pool (main server handles it gracefully)."
 echo ""
 
-exec llama-rpc-server --host "$HOST" --port "$PORT"
+exec rpc-server --host "$HOST" --port "$PORT"

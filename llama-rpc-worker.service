@@ -1,0 +1,40 @@
+[Unit]
+Description=llama.cpp RPC Worker
+Documentation=https://github.com/ggml-org/llama.cpp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Override these with a drop-in or environment file:
+#   /etc/systemd/system/llama-rpc-worker.service.d/override.conf
+# or set in /etc/llama-rpc-worker.conf
+EnvironmentFile=-/etc/llama-rpc-worker.conf
+Environment=RPC_HOST=0.0.0.0
+Environment=RPC_PORT=50052
+Environment=RPC_THREADS=12
+Environment=RPC_DEVICE=
+Environment=RPC_CACHE=1
+
+# Set to the user that owns the llama.cpp binaries
+User=llama
+Group=llama
+
+# Adjust if rpc-server is not on PATH for this user
+ExecStart=rpc-server --host ${RPC_HOST} --port ${RPC_PORT} --threads ${RPC_THREADS}
+
+# Auto-restart on crash
+Restart=on-failure
+RestartSec=5s
+
+# Give GPUs time to settle on boot before we try to claim them
+ExecStartPre=/bin/sleep 2
+
+# Logging — view with: journalctl -u llama-rpc-worker -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=llama-rpc-worker
+
+[Install]
+WantedBy=multi-user.target

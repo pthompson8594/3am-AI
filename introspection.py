@@ -191,6 +191,8 @@ class ErrorJournal:
             context=context[:500],
         )
         self.entries.append(entry)
+        if len(self.entries) > 100:
+            self.entries = self.entries[-100:]
         self._save()
     
     def get_common_errors(self) -> dict[str, int]:
@@ -586,7 +588,8 @@ class IntrospectionLoop:
         try:
             if not self._client:
                 self._client = httpx.AsyncClient(timeout=60.0)
-            clustering_result = await self.memory.run_torque_clustering_async(self._client, mode="auto")
+            _cluster_client = self._client  # local ref — stop() may null self._client mid-await
+            clustering_result = await self.memory.run_torque_clustering_async(_cluster_client, mode="auto")
             results["torque_clustering"] = clustering_result
             if clustering_result.get("status") == "success":
                 self.stats.torque_clustering_runs += 1

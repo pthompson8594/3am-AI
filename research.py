@@ -479,6 +479,8 @@ class ResearchSystem:
 
             new_topics.append(topic)
             self.topics.append(topic)
+        if len(self.topics) > 50:
+            self.topics = self.topics[-50:]
 
         self._save()
         if new_topics:
@@ -544,6 +546,8 @@ class ResearchSystem:
             )
             new_insights.append(insight)
             self.insights.append(insight)
+            if len(self.insights) > 100:
+                self.insights = self.insights[-100:]
 
             # Store finding into memory and record the memory ID for cascade delete.
             # Pass source_memory_ids so causal lanes are built (one-way: source → research).
@@ -629,6 +633,8 @@ class ResearchSystem:
             added_at=time.time(),
         )
         self.topics.append(topic)
+        if len(self.topics) > 50:
+            self.topics = self.topics[-50:]
         self._save()
         self.on_status(f"[Research] Queued topic: {topic_name}")
     

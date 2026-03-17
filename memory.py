@@ -1196,7 +1196,7 @@ class MemorySystem:
             f"- {self.messages[mid].summary}"
             for mid in memory_ids[:10] if mid in self.messages
         ]
-        if not summaries:
+        if not summaries or http_client is None:
             return "General"
         prompt = CLUSTER_THEME_PROMPT.format(memories="\n".join(summaries))
         try:

@@ -35,6 +35,10 @@ def Updateljmat(old_ljmat, neiborloc, community, commu_DM, G, ALL_DM):
     pd = len(community[0])
     
     if pd > 1:
+        # Convert csr_matrix to lil_matrix for efficient element-wise assignment
+        if sp.issparse(old_ljmat) and not sp.isspmatrix_lil(old_ljmat):
+            old_ljmat = old_ljmat.tolil()
+
         # Count non-empty neighbor entries (MATLAB compatible)
         cutlinknum = sum(1 for n in neiborloc if not is_matlab_empty(n))
         

@@ -575,6 +575,8 @@ class SelfImproveSystem:
         )
         
         self.suggestions.append(suggestion)
+        if len(self.suggestions) > 50:
+            self.suggestions = self.suggestions[-50:]
         self._save()
         self.on_status(f"[SelfImprove] New suggestion: {suggestion.title}")
         
@@ -603,6 +605,8 @@ class SelfImproveSystem:
         )
         
         self.suggestions.append(suggestion)
+        if len(self.suggestions) > 50:
+            self.suggestions = self.suggestions[-50:]
         self._save()
         self.on_status(f"[SelfImprove] New suggestion: {suggestion.title}")
         
@@ -640,6 +644,8 @@ class SelfImproveSystem:
         )
         
         self.suggestions.append(suggestion)
+        if len(self.suggestions) > 50:
+            self.suggestions = self.suggestions[-50:]
         self._save()
         self.on_status(f"[SelfImprove] New prompt suggestion: {suggestion.title}")
         
@@ -904,6 +910,8 @@ class SelfImproveSystem:
         )
         
         self.suggestions.append(suggestion)
+        if len(self.suggestions) > 50:
+            self.suggestions = self.suggestions[-50:]
         self._save()
         
         self.on_status(f"[SelfImprove] Generated suggestion from self-research")
